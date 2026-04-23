@@ -209,7 +209,7 @@ export const eventosHoje: EventoCamera[] = alunos
     alunoId: a.id,
     cameraId: cameras.find((c) => c.escolaId === a.escolaId)?.id || "c1",
     horario: a.horarioEntrada!,
-    tipo: a.presencaHoje === "saiu" ? "Saiu" : "Entrou",
+    tipo: (a.presencaHoje === "saiu" ? "Saiu" : "Entrou") as "Entrou" | "Saiu",
     reconhecido: a.biometriaAtiva,
   }))
   .sort((a, b) => b.horario.localeCompare(a.horario));
