@@ -91,7 +91,7 @@ export default function PWA() {
                             <div><span className="font-mono text-primary">{f.horarioEntrada}</span> — {f.nome.split(" ")[0]} entrou na escola ✅</div>
                           )}
                           {f.horarioSaida && (
-                            <div><span className="font-mono text-orange-400">{f.horarioSaida}</span> — {f.nome.split(" ")[0]} saiu da escola 🍽️</div>
+                            <div><span className="font-mono text-warning">{f.horarioSaida}</span> — {f.nome.split(" ")[0]} saiu da escola 🍽️</div>
                           )}
                           {!f.horarioEntrada && (
                             <div className="text-destructive">Sem registros de entrada hoje ⚠️</div>
