@@ -1,0 +1,530 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  STAFF
+  GUARDIAN
+}
+
+enum TenantPlan {
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum StudentStatus {
+  ACTIVE
+  TRANSFERRED
+  INACTIVE
+}
+
+enum StudentShift {
+  MORNING
+  AFTERNOON
+  FULL_DAY
+}
+
+enum CameraType {
+  IP
+  USB
+  RTSP
+}
+
+enum CameraStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  LEFT
+}
+
+enum NotificationType {
+  ENTRY
+  EXIT
+  ABSENCE
+  LATE
+}
+
+enum NotificationChannel {
+  WHATSAPP
+  PUSH
+}
+
+enum NotificationStatus {
+  SENT
+  FAILED
+  PENDING
+}
+
+enum CameraEventType {
+  ENTRY
+  EXIT
+  UNKNOWN
+}
+
+enum FaceMatchStatus {
+  MATCHED
+  REVIEW_REQUIRED
+  UNMATCHED
+}
+
+enum FaceRecognitionType {
+  ENTRY
+  EXIT
+  UNKNOWN
+}
+
+enum FaceEnrollmentSource {
+  ADMIN_UPLOAD
+  LIVE_CAPTURE
+  MIGRATION
+}
+
+enum GuardianRelationship {
+  FATHER
+  MOTHER
+  GRANDMOTHER
+  GRANDFATHER
+  UNCLE
+  AUNT
+  LEGAL_GUARDIAN
+  OTHER
+}
+
+model Tenant {
+  id          String          @id @default(cuid())
+  name        String
+  slug        String          @unique
+  plan        TenantPlan      @default(PRO)
+  isActive    Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  users       User[]
+  schools     School[]
+  schoolClasses SchoolClass[]
+  guardians   Guardian[]
+  students    Student[]
+  cameras     Camera[]
+  attendance  Attendance[]
+  notifications Notification[]
+  settings    TenantSettings?
+  sessions    Session[]
+  cameraEvents CameraEvent[]
+  faceIdentities FaceIdentity[]
+  faceEnrollments FaceEnrollment[]
+  faceEmbeddings FaceEmbedding[]
+  faceRecognitionEvents FaceRecognitionEvent[]
+}
+
+model User {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         UserRole  @default(OWNER)
+  avatarUrl    String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sessions     Session[]
+  faceEnrollmentsApproved FaceEnrollment[]
+
+  @@index([tenantId])
+}
+
+model Session {
+  id          String   @id @default(cuid())
+  userId      String
+  tenantId    String
+  tokenHash   String   @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  lastUsedAt  DateTime?
+  userAgent   String?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, expiresAt])
+  @@index([userId])
+}
+
+model School {
+  id               String   @id @default(cuid())
+  tenantId         String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name             String
+  cnpj             String
+  address          String
+  city             String
+  state            String
+  phone            String
+  email            String
+  logoUrl          String?
+  openingTime      String
+  closingTime       String
+  toleranceMinutes Int      @default(15)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  students        Student[]
+  classes         SchoolClass[]
+  cameras         Camera[]
+  attendance      Attendance[]
+  notifications   Notification[]
+  cameraEvents    CameraEvent[]
+  faceIdentities  FaceIdentity[]
+  faceRecognitionEvents FaceRecognitionEvent[]
+
+  @@unique([tenantId, cnpj])
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+model SchoolClass {
+  id          String       @id @default(cuid())
+  tenantId    String
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolId    String
+  school      School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  name        String
+  shift       StudentShift
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  students    Student[]
+
+  @@unique([tenantId, schoolId, name, shift])
+  @@index([tenantId, schoolId])
+  @@index([tenantId, schoolId, shift])
+}
+
+model Guardian {
+  id           String              @id @default(cuid())
+  tenantId     String
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  cpf          String
+  whatsapp     String
+  email        String
+  relationship GuardianRelationship
+  photoUrl     String?
+  isActive     Boolean             @default(true)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  primaryStudents Student[]        @relation("PrimaryGuardian")
+  links          StudentGuardian[]
+  notifications  Notification[]
+
+  @@unique([tenantId, cpf])
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+model Student {
+  id                  String         @id @default(cuid())
+  tenantId            String
+  tenant              Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolId            String
+  school              School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classId             String?
+  schoolClass         SchoolClass?   @relation(fields: [classId], references: [id], onDelete: SetNull)
+  name                String
+  registrationNumber  String
+  birthDate           DateTime
+  className           String
+  shift               StudentShift
+  photoUrl            String?
+  status              StudentStatus  @default(ACTIVE)
+  biometricEnabled    Boolean        @default(true)
+  currentPresence     AttendanceStatus @default(ABSENT)
+  entryTime           String?
+  exitTime            String?
+  primaryGuardianId   String?
+  primaryGuardian     Guardian?      @relation("PrimaryGuardian", fields: [primaryGuardianId], references: [id], onDelete: SetNull)
+  guardianLinks       StudentGuardian[]
+  attendance          Attendance[]
+  cameraEvents        CameraEvent[]
+  notifications       Notification[]
+  faceIdentities      FaceIdentity[]
+  faceRecognitionEvents FaceRecognitionEvent[]
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  @@unique([tenantId, registrationNumber])
+  @@index([tenantId, schoolId])
+  @@index([tenantId, classId])
+  @@index([tenantId, primaryGuardianId])
+}
+
+model StudentGuardian {
+  studentId String
+  guardianId String
+  tenantId  String
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  guardian  Guardian @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@id([studentId, guardianId])
+  @@index([tenantId])
+}
+
+model Camera {
+  id                   String         @id @default(cuid())
+  tenantId             String
+  tenant               Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolId             String
+  school               School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  name                 String
+  location             String
+  type                 CameraType
+  streamUrl            String
+  resolution           String
+  fps                  Int            @default(30)
+  status               CameraStatus    @default(ACTIVE)
+  port                 Int?
+  username             String?
+  passwordEncrypted    String?
+  recognitionStartTime String?
+  recognitionEndTime   String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  attendance           Attendance[]
+  cameraEvents         CameraEvent[]
+  faceRecognitionEvents FaceRecognitionEvent[]
+  runtimeStatus        CameraRuntimeStatus?
+
+  @@index([tenantId, schoolId])
+}
+
+model CameraRuntimeStatus {
+  id              String   @id @default(cuid())
+  tenantId        String
+  schoolId        String
+  cameraId        String   @unique
+  camera          Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  gatewayId       String?
+  healthStatus    String   @default("OFFLINE")
+  lastHeartbeatAt DateTime?
+  lastFrameAt     DateTime?
+  lastError       String?
+  measuredFps     Float?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([tenantId, schoolId])
+  @@index([healthStatus])
+  @@index([lastHeartbeatAt])
+}
+
+model Attendance {
+  id           String           @id @default(cuid())
+  tenantId     String
+  tenant       Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  studentId    String
+  student      Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  schoolId     String
+  school       School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  cameraId     String?
+  camera       Camera?          @relation(fields: [cameraId], references: [id], onDelete: SetNull)
+  date         String
+  status       AttendanceStatus
+  entryAt      DateTime?
+  exitAt       DateTime?
+  recognized   Boolean          @default(false)
+  confidence   Float?
+  notified     Boolean          @default(false)
+  notes        String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  notifications Notification[]
+  cameraEvents  CameraEvent[]
+  faceRecognitionEvents FaceRecognitionEvent[]
+
+  @@unique([tenantId, studentId, date])
+  @@index([tenantId, schoolId, date])
+}
+
+model Notification {
+  id           String             @id @default(cuid())
+  tenantId     String
+  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolId     String
+  school       School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  studentId    String
+  student      Student            @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  guardianId   String
+  guardian     Guardian           @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+  attendanceId String?
+  attendance   Attendance?        @relation(fields: [attendanceId], references: [id], onDelete: SetNull)
+  type         NotificationType
+  channel      NotificationChannel
+  status       NotificationStatus @default(PENDING)
+  sentAt       DateTime?
+  message      String
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([tenantId, status])
+}
+
+model CameraEvent {
+  id          String          @id @default(cuid())
+  tenantId    String
+  tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolId    String
+  school      School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  cameraId    String
+  camera      Camera          @relation(fields: [cameraId], references: [id], onDelete: Cascade)
+  studentId   String?
+  student     Student?        @relation(fields: [studentId], references: [id], onDelete: SetNull)
+  attendanceId String?
+  attendance  Attendance?     @relation(fields: [attendanceId], references: [id], onDelete: SetNull)
+  type        CameraEventType
+  recognized  Boolean         @default(false)
+  confidence  Float?
+  snapshotUrl String?
+  happenedAt  DateTime        @default(now())
+  createdAt   DateTime        @default(now())
+
+  @@index([tenantId, happenedAt])
+}
+
+model TenantSettings {
+  id                     String   @id @default(cuid())
+  tenantId               String   @unique
+  tenant                 Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  notifyEntry            Boolean  @default(true)
+  notifyExit             Boolean  @default(true)
+  notifyLate             Boolean  @default(true)
+  notifyAbsence          Boolean  @default(true)
+  whatsappEnabled        Boolean  @default(true)
+  pushEnabled            Boolean  @default(true)
+  confidenceThreshold    Int      @default(85)
+  framesPerSecond        Int      @default(15)
+  saveFrames             Boolean  @default(true)
+  detectMasks            Boolean  @default(false)
+  twoFactorEnabled       Boolean  @default(true)
+  auditLogEnabled        Boolean  @default(true)
+  recordingsRetentionDays Int     @default(30)
+  logsRetentionDays      Int      @default(90)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+model FaceIdentity {
+  id          String            @id @default(cuid())
+  tenantId    String
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  schoolId    String
+  school      School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  label       String
+  isActive    Boolean           @default(true)
+  notes       String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  enrollments FaceEnrollment[]
+  embeddings  FaceEmbedding[]
+  events      FaceRecognitionEvent[]
+
+  @@unique([tenantId, studentId])
+  @@index([tenantId, schoolId])
+}
+
+model FaceEnrollment {
+  id              String             @id @default(cuid())
+  tenantId        String
+  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  identityId      String
+  identity        FaceIdentity       @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  imagePath       String
+  sourceType      FaceEnrollmentSource @default(ADMIN_UPLOAD)
+  sourceLabel     String?
+  metadata        Json?
+  approvedByUserId String?
+  approvedBy      User?              @relation(fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  approvedAt      DateTime?
+  createdAt       DateTime           @default(now())
+
+  embeddings      FaceEmbedding[]
+
+  @@index([tenantId, identityId])
+}
+
+model FaceEmbedding {
+  id            String       @id @default(cuid())
+  tenantId      String
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  identityId    String
+  identity      FaceIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  enrollmentId  String
+  enrollment    FaceEnrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  modelName     String
+  modelVersion  String?
+  vector        Json
+  qualityScore  Float?
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([tenantId, identityId, isActive])
+}
+
+model FaceRecognitionEvent {
+  id            String             @id @default(cuid())
+  tenantId      String
+  tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolId      String
+  school        School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  cameraId      String?
+  camera        Camera?            @relation(fields: [cameraId], references: [id], onDelete: SetNull)
+  studentId     String?
+  student       Student?           @relation(fields: [studentId], references: [id], onDelete: SetNull)
+  identityId    String?
+  identity      FaceIdentity?      @relation(fields: [identityId], references: [id], onDelete: SetNull)
+  attendanceId  String?
+  attendance    Attendance?        @relation(fields: [attendanceId], references: [id], onDelete: SetNull)
+  type          FaceRecognitionType
+  matchStatus   FaceMatchStatus
+  confidence    Float?
+  reviewReason  String?
+  snapshotPath  String?
+  metadata      Json?
+  dedupeKey     String?
+  recognizedAt  DateTime
+  createdAt     DateTime           @default(now())
+
+  @@index([tenantId, recognizedAt])
+  @@index([tenantId, schoolId])
+  @@index([tenantId, cameraId])
+  @@index([tenantId, studentId])
+}

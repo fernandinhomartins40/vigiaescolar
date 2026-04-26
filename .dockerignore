@@ -1,0 +1,10 @@
+.git
+.turbo
+coverage
+dist
+node_modules
+apps/api/dist
+apps/api/node_modules
+apps/api/uploads
+.env
+apps/api/.env

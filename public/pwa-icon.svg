@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="VigiaEscolar">
+  <rect width="512" height="512" rx="96" fill="#0a0e1a"/>
+  <path d="M256 72 384 124v92c0 92-52 172-128 224-76-52-128-132-128-224v-92l128-52Z" fill="#00d4ff" opacity=".18"/>
+  <path d="M256 104 352 143v73c0 68-36 129-96 174-60-45-96-106-96-174v-73l96-39Z" fill="none" stroke="#00d4ff" stroke-width="28" stroke-linejoin="round"/>
+  <circle cx="256" cy="224" r="58" fill="#10b981"/>
+  <path d="M166 352c20-54 56-82 90-82s70 28 90 82" fill="none" stroke="#f8fafc" stroke-width="30" stroke-linecap="round"/>
+  <path d="M214 224h84" stroke="#0a0e1a" stroke-width="24" stroke-linecap="round"/>
+</svg>

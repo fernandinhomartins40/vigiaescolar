@@ -1,0 +1,12 @@
+{
+  "name": "@vigiaescolar/web",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "npm run dev --prefix ../..",
+    "build": "npm run build --prefix ../..",
+    "preview": "npm run preview --prefix ../..",
+    "lint": "npm run lint --prefix ../..",
+    "test": "npm run test --prefix ../.."
+  }
+}

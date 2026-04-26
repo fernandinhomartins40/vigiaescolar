@@ -1,0 +1,327 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                     String                   @id @default(cuid())
+  name                   String
+  cpf                    String?                  @unique
+  personId               String?                  @unique
+  person                 Person?                  @relation(fields: [personId], references: [id], onDelete: SetNull)
+  faceEnrollmentsApproved FaceEnrollment[]        @relation("FaceEnrollmentApprovedBy")
+  faceEventsReviewed     FaceRecognitionEvent[]   @relation("FaceEventReviewedBy")
+
+  @@map("users")
+}
+
+model Person {
+  id           String                    @id @default(cuid())
+  cpf          String?                   @unique
+  name         String
+  email        String?
+  phone        String?
+  rg           String?
+  birthDate    DateTime?
+  isActive     Boolean                   @default(true)
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+  user         User?
+  citizen      Citizen?
+  faceIdentity FaceRecognitionIdentity?
+
+  @@index([name])
+  @@index([email])
+  @@map("people")
+}
+
+model Citizen {
+  id                  String                   @id @default(cuid())
+  cpf                 String
+  name                String
+  email               String
+  personId            String?                  @unique
+  phone               String?
+  phoneSecondary      String?
+  birthDate           DateTime?
+  isActive            Boolean                  @default(true)
+  rg                  String?
+  person              Person?                  @relation(fields: [personId], references: [id], onDelete: SetNull)
+  faceIdentity        FaceRecognitionIdentity?
+  faceEventsAsStudent FaceRecognitionEvent[]   @relation("FaceEventStudent")
+  faceEventsAsGuardian FaceRecognitionEvent[]  @relation("FaceEventGuardian")
+
+  @@index([cpf])
+  @@index([personId])
+  @@map("citizens")
+}
+
+model UnidadeEducacao {
+  id                          String                        @id @default(cuid())
+  nome                        String
+  tipo                        String
+  telefone                    String?
+  email                       String?
+  isActive                    Boolean                       @default(true)
+  faceDevices                 FaceDevice[]
+  faceZones                   FaceZone[]
+  faceEvents                  FaceRecognitionEvent[]
+  schoolSecurityConfiguration SchoolSecurityConfiguration?
+
+  @@index([tipo, isActive])
+  @@index([isActive])
+  @@map("unidades_educacao")
+}
+
+model Matricula {
+  id                String             @id @default(cuid())
+  alunoId           String
+  responsavelId     String
+  unidadeEducacaoId String
+  numeroMatricula   String             @unique
+  situacao          SituacaoMatricula
+  updatedAt         DateTime           @updatedAt
+
+  @@index([alunoId])
+  @@index([unidadeEducacaoId, situacao])
+  @@map("matriculas")
+}
+
+enum SituacaoMatricula {
+  ATIVA
+  TRANSFERIDA
+  CANCELADA
+  CONCLUIDA
+}
+
+enum FaceRecognitionIdentityStatus {
+  PENDING
+  REVIEW
+  ACTIVE
+  SUSPENDED
+}
+
+enum FaceEnrollmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum FaceDeviceType {
+  CAMERA
+  GATEWAY
+  NVR
+}
+
+enum FaceDeviceHealthStatus {
+  ONLINE
+  OFFLINE
+  DEGRADED
+  ERROR
+}
+
+enum FaceZoneDirection {
+  ENTRY
+  EXIT
+  BOTH
+}
+
+enum FaceEventType {
+  DETECTION
+  ENTRY
+  EXIT
+  UNMATCHED
+  REVIEW
+}
+
+enum FaceMatchStatus {
+  MATCHED
+  REVIEW_REQUIRED
+  UNMATCHED
+}
+
+enum GuardianNotificationStatus {
+  NOT_REQUIRED
+  PENDING
+  SENT
+  FAILED
+}
+
+model FaceRecognitionIdentity {
+  id          String                        @id @default(cuid())
+  personId    String                        @unique
+  citizenId   String?                       @unique
+  label       String?
+  status      FaceRecognitionIdentityStatus @default(PENDING)
+  riskFlags   Json?
+  notes       String?
+  createdAt   DateTime                      @default(now())
+  updatedAt   DateTime                      @updatedAt
+  person      Person                        @relation(fields: [personId], references: [id], onDelete: Cascade)
+  citizen     Citizen?                      @relation(fields: [citizenId], references: [id], onDelete: SetNull)
+  enrollments FaceEnrollment[]
+  embeddings  FaceEmbedding[]
+  events      FaceRecognitionEvent[]
+
+  @@index([status])
+  @@map("face_recognition_identities")
+}
+
+model FaceEnrollment {
+  id            String               @id @default(cuid())
+  identityId    String
+  sourceType    String
+  sourceLabel   String?
+  imagePath     String?
+  qualityScore  Float?
+  livenessScore Float?
+  status        FaceEnrollmentStatus @default(PENDING)
+  metadata      Json?
+  approvedById  String?
+  approvedAt    DateTime?
+  capturedAt    DateTime             @default(now())
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  identity      FaceRecognitionIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  approvedBy    User?                @relation("FaceEnrollmentApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  embeddings    FaceEmbedding[]
+
+  @@index([identityId, status])
+  @@index([approvedById])
+  @@map("face_enrollments")
+}
+
+model FaceEmbedding {
+  id           String                 @id @default(cuid())
+  identityId   String
+  enrollmentId String?
+  modelName    String
+  modelVersion String?
+  vector       Float[]
+  qualityScore Float?
+  isActive     Boolean                @default(true)
+  createdAt    DateTime               @default(now())
+  identity     FaceRecognitionIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  enrollment   FaceEnrollment?        @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+
+  @@index([identityId, isActive])
+  @@index([enrollmentId])
+  @@map("face_embeddings")
+}
+
+model FaceDevice {
+  id                  String                 @id @default(cuid())
+  code                String                 @unique
+  name                String
+  unidadeEducacaoId   String?
+  type                FaceDeviceType         @default(CAMERA)
+  protocol            String?                @default("RTSP")
+  manufacturer        String?
+  model               String?
+  locationDescription String?
+  streamUrlEncrypted  String?
+  usernameEncrypted   String?
+  passwordEncrypted   String?
+  healthStatus        FaceDeviceHealthStatus @default(OFFLINE)
+  lastHeartbeatAt     DateTime?
+  isActive            Boolean                @default(true)
+  metadata            Json?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  unidadeEducacao     UnidadeEducacao?       @relation(fields: [unidadeEducacaoId], references: [id], onDelete: SetNull)
+  zones               FaceZone[]
+  events              FaceRecognitionEvent[]
+
+  @@index([unidadeEducacaoId, isActive])
+  @@index([healthStatus])
+  @@map("face_devices")
+}
+
+model FaceZone {
+  id                String            @id @default(cuid())
+  deviceId          String
+  unidadeEducacaoId String?
+  name              String
+  gateName          String?
+  direction         FaceZoneDirection @default(BOTH)
+  dedupeWindowSecs  Int               @default(180)
+  isActive          Boolean           @default(true)
+  metadata          Json?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  device            FaceDevice        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  unidadeEducacao   UnidadeEducacao?  @relation(fields: [unidadeEducacaoId], references: [id], onDelete: SetNull)
+  events            FaceRecognitionEvent[]
+
+  @@index([deviceId, isActive])
+  @@index([unidadeEducacaoId])
+  @@map("face_zones")
+}
+
+model FaceRecognitionEvent {
+  id                    String                     @id @default(cuid())
+  identityId            String?
+  deviceId              String
+  zoneId                String?
+  unidadeEducacaoId     String?
+  studentCitizenId      String?
+  guardianCitizenId     String?
+  type                  FaceEventType
+  matchStatus           FaceMatchStatus
+  confidence            Float?
+  provider              String?
+  modelName             String?
+  modelVersion          String?
+  previewPath           String?
+  boundingBox           Json?
+  metadata              Json?
+  dedupeKey             String?
+  reviewReason          String?
+  reviewedById          String?
+  reviewedAt            DateTime?
+  notificationStatus    GuardianNotificationStatus @default(NOT_REQUIRED)
+  notificationAttempts  Int                        @default(0)
+  lastNotificationError String?
+  recognizedAt          DateTime                   @default(now())
+  createdAt             DateTime                   @default(now())
+  identity              FaceRecognitionIdentity?   @relation(fields: [identityId], references: [id], onDelete: SetNull)
+  device                FaceDevice                 @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  zone                  FaceZone?                  @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  unidadeEducacao       UnidadeEducacao?           @relation(fields: [unidadeEducacaoId], references: [id], onDelete: SetNull)
+  studentCitizen        Citizen?                   @relation("FaceEventStudent", fields: [studentCitizenId], references: [id], onDelete: SetNull)
+  guardianCitizen       Citizen?                   @relation("FaceEventGuardian", fields: [guardianCitizenId], references: [id], onDelete: SetNull)
+  reviewedBy            User?                      @relation("FaceEventReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([recognizedAt])
+  @@index([type, matchStatus])
+  @@index([deviceId, recognizedAt])
+  @@index([zoneId, recognizedAt])
+  @@index([studentCitizenId, recognizedAt])
+  @@index([guardianCitizenId, notificationStatus])
+  @@map("face_recognition_events")
+}
+
+model SchoolSecurityConfiguration {
+  id                   String           @id @default(cuid())
+  unidadeEducacaoId    String           @unique
+  notifyOnEntry        Boolean          @default(true)
+  notifyOnExit         Boolean          @default(true)
+  preferredChannel     String           @default("whatsapp")
+  dedupeWindowSecs     Int              @default(180)
+  entryMessageTemplate String?
+  exitMessageTemplate  String?
+  activeHoursStart     String?
+  activeHoursEnd       String?
+  metadata             Json?
+  isActive             Boolean          @default(true)
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  unidadeEducacao      UnidadeEducacao  @relation(fields: [unidadeEducacaoId], references: [id], onDelete: Cascade)
+
+  @@index([isActive])
+  @@map("school_security_configurations")
+}

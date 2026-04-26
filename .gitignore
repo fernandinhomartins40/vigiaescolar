@@ -10,7 +10,15 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.turbo
+coverage
+*.tsbuildinfo
+apps/api/dist
+apps/api/uploads
 *.local
+
+# Temporary folders
+_tmp_*/
 
 # Editor directories and files
 .vscode/*

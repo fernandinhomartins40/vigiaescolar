@@ -1,34 +1,43 @@
-import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   School,
+  Layers3,
   Users,
   GraduationCap,
   Camera,
   ClipboardCheck,
   Bell,
   Settings,
-  Smartphone,
   ShieldCheck,
   Menu,
   X,
+  LogOut,
+  ScanFace,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/context/auth-context";
+import { Button } from "@/components/ui/button";
 
 const navItems = [
+  { to: "/vigia", label: "Vigia", icon: ShieldCheck, highlight: true },
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/escolas", label: "Escolas", icon: School },
+  { to: "/turmas", label: "Turmas", icon: Layers3 },
   { to: "/responsaveis", label: "Pais / Responsáveis", icon: Users },
   { to: "/alunos", label: "Alunos", icon: GraduationCap },
   { to: "/cameras", label: "Câmeras & Portões", icon: Camera, highlight: true },
+  { to: "/revisao-facial", label: "Revisao Facial", icon: ScanFace },
   { to: "/presenca", label: "Turmas & Presença", icon: ClipboardCheck },
   { to: "/notificacoes", label: "Notificações", icon: Bell },
-  { to: "/pwa", label: "App Responsável", icon: Smartphone },
   { to: "/configuracoes", label: "Configurações", icon: Settings },
 ];
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  const { user, signOut } = useAuth();
+  const navigate = useNavigate();
+
   return (
     <div className="flex h-full flex-col bg-sidebar">
       {/* Logo */}
@@ -73,9 +82,33 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <div className="glass-card p-3 text-xs">
           <div className="flex items-center gap-2 text-secondary font-display tracking-wide">
             <span className="h-2 w-2 rounded-full bg-secondary glow-success" />
-            SISTEMA ONLINE
+            CONEXÃO ATIVA
           </div>
-          <div className="mt-1 text-muted-foreground">4 câmeras ativas • 3 escolas</div>
+          <div className="mt-1 text-muted-foreground">
+            {user?.tenantNome || user?.nome || "Conta autenticada"}
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-2">
+            <span className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+              {user?.role || "admin"}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 border-primary/20 bg-background/60 text-xs"
+              onClick={async () => {
+                try {
+                  await signOut();
+                } finally {
+                  navigate("/login", { replace: true });
+                  onNavigate?.();
+                }
+              }}
+            >
+              <LogOut className="h-3.5 w-3.5 mr-1" />
+              Sair
+            </Button>
+          </div>
         </div>
       </div>
     </div>
@@ -90,6 +123,7 @@ function pageTitle(pathname: string) {
 export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
+  const { user } = useAuth();
 
   return (
     <div className="min-h-screen w-full flex bg-background">
@@ -130,6 +164,9 @@ export default function AppLayout() {
             <span className="hidden sm:flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 rounded-full bg-secondary animate-pulse-soft" />
               ONLINE
+            </span>
+            <span className="hidden md:inline text-muted-foreground/80">
+              {user?.tenantNome || user?.nome || "Conta ativa"}
             </span>
             <span className="font-display tracking-wider text-primary">
               {new Date().toLocaleDateString("pt-BR")}
