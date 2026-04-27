@@ -43,7 +43,7 @@ services:
       PORT: 3001
       DATABASE_URL: postgresql://vigia:${DB_PASSWORD:-vigia}@db:5432/vigiaescolar?schema=public
       SESSION_SECRET: ${SESSION_SECRET}
-      WEB_ORIGIN: https://vigiaescolar.com.br
+      CORS_ORIGINS: https://vigiaescolar.com.br,https://www.vigiaescolar.com.br
       FACE_PLATFORM_URL: http://face-server:9006/api/face-platform
       FACE_PLATFORM_SERVICE_TOKEN: ${FACE_PLATFORM_SERVICE_TOKEN}
       CAMERA_GATEWAY_SERVICE_TOKEN: ${CAMERA_GATEWAY_SERVICE_TOKEN}
