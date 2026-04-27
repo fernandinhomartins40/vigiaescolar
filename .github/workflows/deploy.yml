@@ -16,23 +16,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install sshpass
-        run: sudo apt-get install -y sshpass rsync
+      - name: Install rsync
+        run: sudo apt-get install -y rsync
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_PASSWORD }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H 72.60.10.108 >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Copy source to VPS
-        env:
-          VPS_HOST: 72.60.10.108
-          VPS_USER: root
-          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
         run: |
-          sshpass -p "$VPS_PASSWORD" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            $VPS_USER@$VPS_HOST \
-            "mkdir -p /opt/vigiaescolar"
-
-          sshpass -p "$VPS_PASSWORD" rsync -az --delete \
-            -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
             --exclude='.git/' \
             --exclude='node_modules/' \
             --exclude='.env' \
@@ -40,18 +37,18 @@ jobs:
             --exclude='apps/api/uploads/' \
             --exclude='ultrazend-face-server/node_modules/' \
             --exclude='apps/camera-gateway/node_modules/' \
-            ./ $VPS_USER@$VPS_HOST:/opt/vigiaescolar/
+            ./ root@72.60.10.108:/opt/vigiaescolar/
 
       - name: Run deploy script on VPS
-        env:
-          VPS_HOST: 72.60.10.108
-          VPS_USER: root
-          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
         run: |
-          sshpass -p "$VPS_PASSWORD" ssh \
+          ssh \
+            -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=20 \
-            $VPS_USER@$VPS_HOST \
-            "bash /opt/vigiaescolar/scripts/deploy.sh 2>&1"
+            root@72.60.10.108 \
+            "mkdir -p /opt/vigiaescolar && bash /opt/vigiaescolar/scripts/deploy.sh 2>&1"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
