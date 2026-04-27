@@ -640,14 +640,14 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
   const [lastModelName, setLastModelName] = useState("face-api.js");
 
   useEffect(() => {
-    if (!cameraActive) {
+    if (!cameraActive && !cameraLoading) {
       setStatusMessage(
         mode === "guard"
-          ? "Selecione uma câmera cadastrada e inicie o vigia operacional."
+          ? "Iniciando monitoramento automático..."
           : "Abra a câmera do dispositivo para detectar múltiplos rostos em tempo real.",
       );
     }
-  }, [cameraActive, mode]);
+  }, [cameraActive, cameraLoading, mode]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -796,7 +796,6 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
     setCameraActive(false);
     setFaces([]);
     setLastModelName("face-api.js");
-    setStatusMessage("Abra a câmera do dispositivo para detectar múltiplos rostos em tempo real.");
     clearOverlay(canvasRef.current);
   }, [stopAnimationLoop]);
 
@@ -1212,9 +1211,13 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
   return (
     <>
       <PageHeader
-        title="Câmeras & Portões"
-        subtitle="Teste ao vivo com detecção e identificação multi-rosto via face-api.js"
-        breadcrumb={[{ label: "Início", href: "/" }, { label: "Câmeras" }]}
+        title={mode === "guard" ? "Vigia Operacional" : "Câmeras & Portões"}
+        subtitle={
+          mode === "guard"
+            ? "Monitoramento contínuo com reconhecimento facial automático"
+            : "Teste ao vivo com detecção e identificação multi-rosto via face-api.js"
+        }
+        breadcrumb={[{ label: "Início", href: "/" }, { label: mode === "guard" ? "Vigia" : "Câmeras" }]}
         actions={
           <Link to="/cameras/cadastro">
             <Button variant="outline">
@@ -1303,26 +1306,40 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
               </>
             ) : (
               <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 px-4 text-center">
-                <CameraIcon className="h-12 w-12 text-primary/60" />
-                <span className="font-display tracking-widest text-primary/80 text-sm">
-                  {cameraLoading ? "ABRINDO CÂMERA" : "SESSÃO AO VIVO"}
-                </span>
-                <p className="max-w-sm text-xs text-muted-foreground">
-                  {cameraLoading
-                    ? "Preparando o reconhecimento facial..."
-                    : "Abra a câmera do dispositivo para detectar, rotular e acompanhar vários rostos simultaneamente."}
-                </p>
-                {mode !== "guard" ? (
-                <Button
-                  onClick={startCamera}
-                  className="bg-primary text-primary-foreground hover:bg-primary/90"
-                  type="button"
-                  disabled={cameraLoading}
-                >
-                  <CameraIcon className="h-4 w-4 mr-1" />
-                  {cameraLoading ? "Abrindo câmera..." : "Iniciar teste ao vivo"}
-                </Button>
-                ) : null}
+                {mode === "guard" ? (
+                  <>
+                    <Loader2 className="h-12 w-12 text-primary/60 animate-spin" />
+                    <span className="font-display tracking-widest text-primary/80 text-sm">
+                      {cameraLoading ? "INICIANDO VIGIA" : "AGUARDANDO CÂMERA"}
+                    </span>
+                    <p className="max-w-sm text-xs text-muted-foreground">
+                      {cameraLoading
+                        ? "Carregando modelos de reconhecimento facial..."
+                        : "Selecione uma câmera cadastrada no seletor acima."}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <CameraIcon className="h-12 w-12 text-primary/60" />
+                    <span className="font-display tracking-widest text-primary/80 text-sm">
+                      {cameraLoading ? "ABRINDO CÂMERA" : "SESSÃO AO VIVO"}
+                    </span>
+                    <p className="max-w-sm text-xs text-muted-foreground">
+                      {cameraLoading
+                        ? "Preparando o reconhecimento facial..."
+                        : "Abra a câmera do dispositivo para detectar, rotular e acompanhar vários rostos simultaneamente."}
+                    </p>
+                    <Button
+                      onClick={startCamera}
+                      className="bg-primary text-primary-foreground hover:bg-primary/90"
+                      type="button"
+                      disabled={cameraLoading}
+                    >
+                      <CameraIcon className="h-4 w-4 mr-1" />
+                      {cameraLoading ? "Abrindo câmera..." : "Iniciar teste ao vivo"}
+                    </Button>
+                  </>
+                )}
               </div>
             )}
 
@@ -1355,33 +1372,45 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-3 mt-3">
-            {!cameraActive ? (
-              mode !== "guard" ? (
-              <Button type="button" onClick={startCamera} disabled={cameraLoading}>
-                {cameraLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CameraIcon className="mr-2 h-4 w-4" />}
-                Iniciar teste ao vivo
-              </Button>
-              ) : null
+            {mode === "guard" ? (
+              cameraActive ? (
+                <Button type="button" variant="outline" onClick={stopCamera}>
+                  <CameraOff className="mr-2 h-4 w-4" />
+                  Parar vigia
+                </Button>
+              ) : (
+                <Button type="button" onClick={startCamera} disabled={cameraLoading}>
+                  {cameraLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CameraIcon className="mr-2 h-4 w-4" />}
+                  {cameraLoading ? "Iniciando..." : "Reiniciar vigia"}
+                </Button>
+              )
             ) : (
-              <Button type="button" variant="outline" onClick={stopCamera}>
-                <CameraOff className="mr-2 h-4 w-4" />
-                Parar câmera
-              </Button>
+              <>
+                {!cameraActive ? (
+                  <Button type="button" onClick={startCamera} disabled={cameraLoading}>
+                    {cameraLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CameraIcon className="mr-2 h-4 w-4" />}
+                    Iniciar teste ao vivo
+                  </Button>
+                ) : (
+                  <Button type="button" variant="outline" onClick={stopCamera}>
+                    <CameraOff className="mr-2 h-4 w-4" />
+                    Parar câmera
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setError(null);
+                    stopCamera();
+                    setFaces([]);
+                  }}
+                >
+                  <Loader2 className="mr-2 h-4 w-4" />
+                  Reiniciar teste
+                </Button>
+              </>
             )}
-
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                setError(null);
-                stopCamera();
-                setFaces([]);
-                setStatusMessage("Teste reiniciado. Abra a câmera novamente para continuar.");
-              }}
-            >
-              <Loader2 className="mr-2 h-4 w-4" />
-              Reiniciar teste
-            </Button>
           </div>
 
           {error && (
