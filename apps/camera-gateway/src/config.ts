@@ -20,6 +20,12 @@ export const config = {
   snapshotDir: path.resolve(stringEnv("CAMERA_GATEWAY_SNAPSHOT_DIR", path.join(process.cwd(), "snapshots"))),
   snapshotTimeoutMs: numberEnv("CAMERA_GATEWAY_SNAPSHOT_TIMEOUT_MS", 15_000),
   maxConcurrentCaptures: numberEnv("CAMERA_GATEWAY_MAX_CONCURRENT_CAPTURES", 4),
+  // true quando o gateway está instalado no mesmo dispositivo que possui câmeras USB.
+  // Habilita captura via v4l2/dshow/avfoundation e expõe câmeras USB do banco.
+  isLocal: process.env.CAMERA_GATEWAY_LOCAL === "true",
+  // Dispositivo USB explícito (ex: /dev/video0, "Integrated Camera").
+  // Se vazio, o gateway usa o índice extraído da streamUrl da câmera.
+  usbDevice: stringEnv("CAMERA_USB_DEVICE"),
 };
 
 export function validateConfig() {

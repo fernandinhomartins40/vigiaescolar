@@ -6,7 +6,7 @@ export type GatewayCamera = {
   schoolId: string;
   name: string;
   location: string;
-  type: "RTSP" | "IP";
+  type: "RTSP" | "IP" | "USB";
   streamUrl: string;
   configuredFps: number;
   username: string | null;
@@ -15,7 +15,7 @@ export type GatewayCamera = {
 
 export type CameraHealthStatus = "ONLINE" | "OFFLINE" | "DEGRADED" | "ERROR";
 
-async function apiRequest<T>(path: string, init: RequestInit = {}) {
+async function apiRequest<T>(path: string, init: RequestInit & { headers?: Record<string, string> } = {}) {
   const response = await fetch(`${config.apiBaseUrl}${path}`, {
     ...init,
     headers: {
@@ -41,7 +41,9 @@ async function apiRequest<T>(path: string, init: RequestInit = {}) {
 }
 
 export async function listGatewayCameras() {
-  const payload = await apiRequest<{ cameras: GatewayCamera[] }>("/internal/camera-gateway/cameras");
+  const payload = await apiRequest<{ cameras: GatewayCamera[] }>("/internal/camera-gateway/cameras", {
+    headers: config.isLocal ? { "X-Gateway-Local": "true" } : {},
+  });
   return payload.cameras ?? [];
 }
 

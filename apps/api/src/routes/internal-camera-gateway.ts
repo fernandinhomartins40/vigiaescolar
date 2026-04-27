@@ -76,12 +76,19 @@ function parseOptionalDate(value?: string) {
 
 router.get(
   "/cameras",
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    // Gateways locais (instalados no mesmo dispositivo da câmera USB) podem
+    // requisitar câmeras USB passando o header X-Gateway-Local: true.
+    // Gateways remotos (VPS/cloud) recebem apenas câmeras de rede (RTSP/IP).
+    const isLocal = req.headers["x-gateway-local"] === "true";
+
     const cameras = await prisma.camera.findMany({
       where: {
         status: CameraStatus.ACTIVE,
         type: {
-          in: [CameraType.RTSP, CameraType.IP],
+          in: isLocal
+            ? [CameraType.RTSP, CameraType.IP, CameraType.USB]
+            : [CameraType.RTSP, CameraType.IP],
         },
       },
       include: {
