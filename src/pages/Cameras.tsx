@@ -1099,11 +1099,6 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
       stopCamera();
       setStatusMessage("Preparando a câmera do dispositivo...");
 
-      if (mode === "guard" && !camera) {
-        setError("Selecione uma câmera cadastrada antes de iniciar o vigia.");
-        return;
-      }
-
       const fallbackSchoolId = camera?.escolaId ?? escolaExpand ?? schoolsQuery.data?.[0]?.id ?? null;
       if (!fallbackSchoolId) {
         setError("Selecione ou cadastre uma escola antes de iniciar a câmera do dispositivo.");
@@ -1112,18 +1107,13 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
 
       const resolvedCamera =
         mode === "guard"
-          ? camera
+          ? camera ?? await ensureDeviceCameraSource(fallbackSchoolId)
           : camera?.escolaId === fallbackSchoolId
             ? camera
             : await ensureDeviceCameraSource(fallbackSchoolId);
 
       if (!resolvedCamera) {
         setError("Nenhuma câmera válida foi encontrada para iniciar o monitoramento.");
-        return;
-      }
-
-      if (mode === "guard" && resolvedCamera.tipo !== "USB" && resolvedCamera.url !== "device://live") {
-        setError("No modo vigia, a leitura ao vivo no navegador exige uma câmera do dispositivo cadastrada.");
         return;
       }
 
@@ -1165,6 +1155,7 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
       }
 
       cameraActiveRef.current = true;
+      autoStartedCameraIdRef.current = resolvedCamera.id;
       setCameraActive(true);
       setStatusMessage(
         references.length
@@ -1174,8 +1165,8 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
       startAnimationLoop();
       void runFrameAnalysis();
     } catch (startError) {
-      console.error("Erro ao iniciar o teste multi-rosto:", startError);
-      setError("Não foi possível iniciar a câmera ao vivo. Verifique a permissão do navegador.");
+      console.error("Erro ao iniciar a câmera:", startError);
+      setError("Não foi possível iniciar a câmera. Verifique a permissão do navegador.");
       stopCamera();
     } finally {
       setCameraLoading(false);
@@ -1183,7 +1174,7 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
   }, [camera, escolaExpand, ensureRecognitionReferences, keys.cameras, mode, queryClient, runFrameAnalysis, schoolsQuery.data, startAnimationLoop, stopCamera]);
 
   useEffect(() => {
-    if (mode !== "guard" || !camera?.id || cameraLoading) {
+    if (mode !== "guard" || !camera?.id || cameraLoading || cameraActive) {
       return;
     }
 
@@ -1191,10 +1182,9 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
       return;
     }
 
-    autoStartedCameraIdRef.current = camera.id;
     setError(null);
     void startCamera();
-  }, [camera?.id, cameraLoading, mode, startCamera]);
+  }, [camera?.id, cameraActive, cameraLoading, mode, startCamera]);
 
   useEffect(() => {
     return () => {
