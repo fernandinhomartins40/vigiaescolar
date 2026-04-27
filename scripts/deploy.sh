@@ -3,92 +3,150 @@ set -euo pipefail
 
 APP_DIR="/opt/vigiaescolar"
 COMPOSE="docker compose -f $APP_DIR/docker-compose.prod.yml"
+DOMAIN="vigiaescolar.com.br"
+WWW_DOMAIN="www.vigiaescolar.com.br"
+CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+NGINX_CONF="/etc/nginx/sites-available/vigiaescolar"
 
-echo "==> [1/6] Verificando dependências..."
+# ─── 1. Dependências ──────────────────────────────────────────────────────────
+echo "==> [1/7] Verificando dependências..."
 if ! command -v docker &>/dev/null; then
   apt-get update -qq
   curl -fsSL https://get.docker.com | sh
+  systemctl enable docker --now
+fi
+
+if ! command -v nginx &>/dev/null; then
+  apt-get update -qq
+  apt-get install -y nginx
 fi
 
 if ! command -v certbot &>/dev/null; then
   apt-get install -y certbot python3-certbot-nginx
 fi
 
-echo "==> [2/6] Criando .env de produção (se não existir)..."
+# ─── 2. .env ──────────────────────────────────────────────────────────────────
+echo "==> [2/7] Verificando .env..."
 if [ ! -f "$APP_DIR/.env" ]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-  echo ""
-  echo "AVISO: .env criado a partir do .env.example."
-  echo "       Edite /opt/vigiaescolar/.env com os valores reais antes de continuar."
-  echo ""
+  echo "AVISO: .env criado — edite /opt/vigiaescolar/.env com os valores reais."
 fi
 
-echo "==> [3/6] Configurando nginx para os domínios..."
-cat > /etc/nginx/sites-available/vigiaescolar <<'NGINX'
+# ─── 3. Nginx: config HTTP (apenas se ainda não existe config com SSL) ─────────
+echo "==> [3/7] Configurando nginx..."
+
+# Só escreve a config HTTP se o certbot ainda não gerenciou este arquivo.
+# Após o primeiro certbot, ele insere blocos SSL — não sobrescrevemos mais.
+if [ ! -d "$CERT_DIR" ]; then
+  cat > "$NGINX_CONF" <<NGINX
 server {
     listen 80;
-    server_name vigiaescolar.com.br www.vigiaescolar.com.br;
+    server_name $DOMAIN $WWW_DOMAIN;
 
     client_max_body_size 20m;
+
+    # Webroot para validação do Let's Encrypt
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
 
     location /api/ {
         proxy_pass http://127.0.0.1:7003/api/;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 
     location / {
         proxy_pass http://127.0.0.1:7003/;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 }
 NGINX
 
-ln -sf /etc/nginx/sites-available/vigiaescolar /etc/nginx/sites-enabled/vigiaescolar
-rm -f /etc/nginx/sites-enabled/default
-
-nginx -t && systemctl reload nginx || systemctl restart nginx
-
-echo "==> [4/6] Emitindo/renovando certificado SSL..."
-if [ ! -d "/etc/letsencrypt/live/vigiaescolar.com.br" ]; then
-  certbot --nginx \
-    -d vigiaescolar.com.br \
-    -d www.vigiaescolar.com.br \
-    --non-interactive \
-    --agree-tos \
-    --email admin@vigiaescolar.com.br \
-    --redirect || echo "AVISO: certbot falhou, continuando com HTTP"
+  ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/vigiaescolar
+  rm -f /etc/nginx/sites-enabled/default
+  mkdir -p /var/www/certbot
+  nginx -t
+  systemctl enable nginx --now
+  systemctl reload nginx || systemctl restart nginx
 else
-  certbot renew --quiet --no-self-upgrade || true
+  # Config com SSL já existe — apenas recarrega se a sintaxe for válida
+  ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/vigiaescolar
+  rm -f /etc/nginx/sites-enabled/default
+  nginx -t && systemctl reload nginx
 fi
 
-echo "==> [5/6] Subindo serviços Docker..."
-cd "$APP_DIR"
-$COMPOSE pull --ignore-pull-failures || true
-$COMPOSE build --parallel
-$COMPOSE up -d --remove-orphans
-$COMPOSE run --rm api node -e "
-  const { execSync } = require('child_process');
-  execSync('npx prisma migrate deploy', { stdio: 'inherit', cwd: '/app/apps/api' });
-" 2>/dev/null || \
-$COMPOSE exec -T api sh -c "cd /app/apps/api && npx prisma migrate deploy" || \
-echo "AVISO: migrate deploy falhou ou já está atualizado"
+# ─── 4. SSL: emissão (primeira vez) ou renovação ─────────────────────────────
+echo "==> [4/7] Gerenciando certificado SSL..."
 
-echo "==> [6/6] Status dos containers..."
+if [ ! -d "$CERT_DIR" ]; then
+  echo "  Emitindo certificado pela primeira vez..."
+  certbot --nginx \
+    -d "$DOMAIN" \
+    -d "$WWW_DOMAIN" \
+    --non-interactive \
+    --agree-tos \
+    --email "admin@$DOMAIN" \
+    --redirect
+  echo "  Certificado emitido. Config nginx atualizada pelo certbot."
+else
+  echo "  Certificado já existe — tentando renovação se necessário..."
+  certbot renew --quiet --deploy-hook "systemctl reload nginx" || true
+fi
+
+# Garante renovação automática via cron (idempotente)
+if ! crontab -l 2>/dev/null | grep -q "certbot renew"; then
+  (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --deploy-hook 'systemctl reload nginx'") | crontab -
+  echo "  Cron de renovação SSL configurado."
+fi
+
+# ─── 5. Docker: build e up preservando volumes ───────────────────────────────
+echo "==> [5/7] Subindo serviços Docker (preservando volumes)..."
+cd "$APP_DIR"
+
+# Build das imagens sem derrubar os containers ainda
+$COMPOSE build --parallel
+
+# up -d: recria apenas containers cujas imagens mudaram.
+# --remove-orphans: remove containers de serviços removidos do compose.
+# Volumes nomeados são SEMPRE preservados pelo Docker (nunca deletados pelo up/down).
+$COMPOSE up -d --remove-orphans
+
+# ─── 6. Migrações Prisma ──────────────────────────────────────────────────────
+echo "==> [6/7] Executando migrações do banco de dados..."
+
+# Aguarda API estar saudável antes de migrar
+MAX_WAIT=60
+ELAPSED=0
+until $COMPOSE exec -T api sh -c "exit 0" 2>/dev/null; do
+  sleep 3
+  ELAPSED=$((ELAPSED + 3))
+  if [ $ELAPSED -ge $MAX_WAIT ]; then
+    echo "AVISO: container api não respondeu em ${MAX_WAIT}s, pulando migrate."
+    break
+  fi
+done
+
+$COMPOSE exec -T api sh -c "cd /app/apps/api && npx prisma migrate deploy" \
+  && echo "  Migrações aplicadas com sucesso." \
+  || echo "  AVISO: migrate falhou ou não havia migrações pendentes."
+
+# ─── 7. Status final ──────────────────────────────────────────────────────────
+echo "==> [7/7] Status dos containers..."
 $COMPOSE ps
 
 echo ""
-echo "✓ Deploy concluído!"
-echo "  http://vigiaescolar.com.br"
-echo "  https://vigiaescolar.com.br (se SSL emitido)"
+echo "Deploy concluido!"
+echo "  https://$DOMAIN"
+echo "  https://$WWW_DOMAIN"

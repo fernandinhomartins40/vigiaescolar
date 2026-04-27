@@ -17,24 +17,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install sshpass
-        run: sudo apt-get install -y sshpass
+        run: sudo apt-get install -y sshpass rsync
 
-      - name: Copy files to VPS
-        env:
-          VPS_HOST: 72.60.10.108
-          VPS_USER: root
-          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
-        run: |
-          sshpass -p "$VPS_PASSWORD" rsync -az --delete \
-            -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-            --exclude='.git' \
-            --exclude='node_modules' \
-            --exclude='apps/api/dist' \
-            --exclude='apps/api/uploads' \
-            --exclude='.env' \
-            ./ $VPS_USER@$VPS_HOST:/opt/vigiaescolar/
-
-      - name: Deploy on VPS
+      - name: Copy source to VPS
         env:
           VPS_HOST: 72.60.10.108
           VPS_USER: root
@@ -44,4 +29,29 @@ jobs:
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             $VPS_USER@$VPS_HOST \
-            "bash /opt/vigiaescolar/scripts/deploy.sh"
+            "mkdir -p /opt/vigiaescolar"
+
+          sshpass -p "$VPS_PASSWORD" rsync -az --delete \
+            -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+            --exclude='.git/' \
+            --exclude='node_modules/' \
+            --exclude='.env' \
+            --exclude='apps/api/dist/' \
+            --exclude='apps/api/uploads/' \
+            --exclude='ultrazend-face-server/node_modules/' \
+            --exclude='apps/camera-gateway/node_modules/' \
+            ./ $VPS_USER@$VPS_HOST:/opt/vigiaescolar/
+
+      - name: Run deploy script on VPS
+        env:
+          VPS_HOST: 72.60.10.108
+          VPS_USER: root
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          sshpass -p "$VPS_PASSWORD" ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
+            $VPS_USER@$VPS_HOST \
+            "bash /opt/vigiaescolar/scripts/deploy.sh 2>&1"
