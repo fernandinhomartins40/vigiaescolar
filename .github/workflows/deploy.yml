@@ -1,0 +1,47 @@
+name: Deploy VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Copy files to VPS
+        env:
+          VPS_HOST: 72.60.10.108
+          VPS_USER: root
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          sshpass -p "$VPS_PASSWORD" rsync -az --delete \
+            -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='apps/api/dist' \
+            --exclude='apps/api/uploads' \
+            --exclude='.env' \
+            ./ $VPS_USER@$VPS_HOST:/opt/vigiaescolar/
+
+      - name: Deploy on VPS
+        env:
+          VPS_HOST: 72.60.10.108
+          VPS_USER: root
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          sshpass -p "$VPS_PASSWORD" ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            $VPS_USER@$VPS_HOST \
+            "bash /opt/vigiaescolar/scripts/deploy.sh"

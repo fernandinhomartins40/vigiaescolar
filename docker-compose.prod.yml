@@ -1,0 +1,190 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vigiaescolar
+      POSTGRES_USER: vigia
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-vigia}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vigia -d vigiaescolar"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  face-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: faceplatform
+      POSTGRES_USER: face
+      POSTGRES_PASSWORD: ${FACE_DB_PASSWORD:-face}
+    volumes:
+      - face_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U face -d faceplatform"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: postgresql://vigia:${DB_PASSWORD:-vigia}@db:5432/vigiaescolar?schema=public
+      SESSION_SECRET: ${SESSION_SECRET}
+      WEB_ORIGIN: https://vigiaescolar.com.br
+      FACE_PLATFORM_URL: http://face-server:9006/api/face-platform
+      FACE_PLATFORM_SERVICE_TOKEN: ${FACE_PLATFORM_SERVICE_TOKEN}
+      CAMERA_GATEWAY_SERVICE_TOKEN: ${CAMERA_GATEWAY_SERVICE_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
+      face-server:
+        condition: service_started
+    volumes:
+      - api_uploads:/app/apps/api/uploads
+    expose:
+      - "3001"
+    networks:
+      - internal
+
+  notification-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/workers/notification-worker.js"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://vigia:${DB_PASSWORD:-vigia}@db:5432/vigiaescolar?schema=public
+      NOTIFICATION_WORKER_INTERVAL_MS: 30000
+      WHATSAPP_WEBHOOK_URL: ${WHATSAPP_WEBHOOK_URL:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+  absence-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/workers/absence-worker.js"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://vigia:${DB_PASSWORD:-vigia}@db:5432/vigiaescolar?schema=public
+      ABSENCE_WORKER_INTERVAL_MS: 60000
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+  retention-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/workers/retention-worker.js"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://vigia:${DB_PASSWORD:-vigia}@db:5432/vigiaescolar?schema=public
+      RETENTION_WORKER_INTERVAL_MS: 3600000
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+  face-server:
+    build:
+      context: ./ultrazend-face-server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 9006
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://face:${FACE_DB_PASSWORD:-face}@face-db:5432/faceplatform?schema=public
+      FACE_PLATFORM_SERVICE_TOKEN: ${FACE_PLATFORM_SERVICE_TOKEN}
+      FACE_PLATFORM_ENCRYPTION_KEY: ${FACE_PLATFORM_ENCRYPTION_KEY}
+      DIGIURBAN_API_URL: http://api:3001/api
+      DIGIURBAN_SERVICE_TOKEN: ${FACE_PLATFORM_SERVICE_TOKEN}
+      FACE_PLATFORM_STORAGE_PATH: /app/uploads
+    depends_on:
+      face-db:
+        condition: service_healthy
+    volumes:
+      - face_uploads:/app/uploads
+    expose:
+      - "9006"
+    networks:
+      - internal
+
+  camera-gateway:
+    build:
+      context: ./apps/camera-gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      VIGIA_API_URL: http://api:3001/api
+      CAMERA_GATEWAY_SERVICE_TOKEN: ${CAMERA_GATEWAY_SERVICE_TOKEN}
+      CAMERA_GATEWAY_ID: vps-gateway-01
+      CAMERA_GATEWAY_POLL_INTERVAL_MS: 30000
+      CAMERA_GATEWAY_FRAME_INTERVAL_MS: 5000
+      CAMERA_GATEWAY_SNAPSHOT_DIR: /app/snapshots
+      CAMERA_GATEWAY_MAX_CONCURRENT_CAPTURES: 4
+      FFMPEG_PATH: ffmpeg
+    depends_on:
+      - api
+    volumes:
+      - camera_gateway_snapshots:/app/snapshots
+    networks:
+      - internal
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    expose:
+      - "3000"
+    networks:
+      - internal
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+      - api
+    ports:
+      - "127.0.0.1:7003:7003"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  face_postgres_data:
+  api_uploads:
+  face_uploads:
+  camera_gateway_snapshots:
+
+networks:
+  internal:
+    driver: bridge
