@@ -6,6 +6,11 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  VPS_HOST: 72.60.10.108
+  VPS_USER: root
+  SSH_OPTS: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=20
+
 jobs:
   deploy:
     name: Deploy to VPS
@@ -16,20 +21,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install rsync
-        run: sudo apt-get install -y rsync
-
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_PASSWORD }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H 72.60.10.108 >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Install sshpass and rsync
+        run: sudo apt-get install -y sshpass rsync
 
       - name: Copy source to VPS
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
         run: |
-          rsync -az --delete \
-            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+          sshpass -e ssh $SSH_OPTS $VPS_USER@$VPS_HOST "mkdir -p /opt/vigiaescolar"
+
+          sshpass -e rsync -az --delete \
+            -e "ssh $SSH_OPTS" \
             --exclude='.git/' \
             --exclude='node_modules/' \
             --exclude='.env' \
@@ -37,18 +39,11 @@ jobs:
             --exclude='apps/api/uploads/' \
             --exclude='ultrazend-face-server/node_modules/' \
             --exclude='apps/camera-gateway/node_modules/' \
-            ./ root@72.60.10.108:/opt/vigiaescolar/
+            ./ $VPS_USER@$VPS_HOST:/opt/vigiaescolar/
 
       - name: Run deploy script on VPS
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
         run: |
-          ssh \
-            -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=20 \
-            root@72.60.10.108 \
-            "mkdir -p /opt/vigiaescolar && bash /opt/vigiaescolar/scripts/deploy.sh 2>&1"
-
-      - name: Cleanup SSH key
-        if: always()
-        run: rm -f ~/.ssh/deploy_key
+          sshpass -e ssh $SSH_OPTS $VPS_USER@$VPS_HOST \
+            "bash /opt/vigiaescolar/scripts/deploy.sh 2>&1"
