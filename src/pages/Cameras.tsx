@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
@@ -11,9 +11,12 @@ import {
   Maximize2,
   MessageCircle,
   Pencil,
+  Play,
   Plus,
+  RefreshCw,
   ScanFace,
   Settings,
+  Square,
   Trash2,
   Wifi,
   WifiOff,
@@ -21,6 +24,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Link } from "react-router-dom";
+import { toast } from "sonner";
 import { PageHeader } from "@/components/common/PageHeader";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -41,8 +45,6 @@ import {
 } from "@/lib/resources";
 import { formatWhatsAppLink } from "@/lib/whatsapp";
 import { cn } from "@/lib/utils";
-import { useMutation } from "@tanstack/react-query";
-import { toast } from "sonner";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -78,6 +80,9 @@ type LoadedRecognitionReference = {
 
 type CamerasMode = "test" | "guard";
 type ViewTab = "monitor" | "live";
+
+// Estado de execução de uma câmera USB
+type CameraRunState = "idle" | "loading" | "active" | "error";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -315,6 +320,399 @@ function timeAgo(iso?: string) {
   return `${Math.floor(diff / 86400)}d atrás`;
 }
 
+// ─── Hook: câmera USB ao vivo ─────────────────────────────────────────────────
+
+function useLiveCamera(camera: Camera | undefined, references: LoadedRecognitionReference[], queryClient: ReturnType<typeof useQueryClient>, keys: ReturnType<typeof useTenantResourceKeyFactory>) {
+  const [state, setState] = useState<CameraRunState>("idle");
+  const [faces, setFaces] = useState<RecognitionSnapshot[]>([]);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [lastModelName, setLastModelName] = useState("face-api.js");
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const legacyCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const submissionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const lastAnalysisAtRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const activeRef = useRef(false);
+  const faceApiRef = useRef<FaceApiModule | null>(null);
+  const refsRef = useRef<LoadedRecognitionReference[]>([]);
+  const cooldownRef = useRef<Map<string, number>>(new Map());
+  const inFlightRecRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => { refsRef.current = references; }, [references]);
+
+  const stopStream = useCallback(() => {
+    if (animationFrameRef.current !== null) { window.cancelAnimationFrame(animationFrameRef.current); animationFrameRef.current = null; }
+    activeRef.current = false;
+    const stream = streamRef.current; streamRef.current = null;
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (videoRef.current) { videoRef.current.srcObject = null; }
+    inFlightRef.current = false; lastAnalysisAtRef.current = 0;
+    clearOverlay(canvasRef.current);
+    setAnalyzing(false); setFaces([]); setStatusMessage(""); setErrorMessage(null);
+  }, []);
+
+  const persistMatches = useCallback(async (video: HTMLVideoElement, detections: LiveFaceDetection[], snapshots: RecognitionSnapshot[]) => {
+    if (!camera?.id || !camera?.escolaId) return;
+    const pairs = snapshots.map((s, i) => ({ s, d: detections[i] })).filter(({ s, d }) => Boolean(d) && s.matchStatus === "MATCHED" && Boolean(s.identityKey));
+    if (!pairs.length) return;
+    await Promise.allSettled(pairs.map(async ({ s, d }) => {
+      const key = s.identityKey!;
+      const now = Date.now();
+      if (inFlightRecRef.current.has(key) || now - (cooldownRef.current.get(key) ?? 0) < RECOGNITION_SUBMIT_COOLDOWN_MS) return;
+      const crop = captureRecognitionCrop(video, d.detection.box, submissionCanvasRef.current);
+      if (!crop) return;
+      inFlightRecRef.current.add(key);
+      try {
+        const res = await registerCameraRecognition({ cameraId: camera.id, schoolId: camera.escolaId, imagemBase64: crop, expectedStudentId: s.studentId ?? undefined, direcao: "ENTRY", reconhecidoEm: new Date().toISOString(), metadata: { source: "cameras-monitor", localIdentityKey: key } });
+        cooldownRef.current.set(key, Date.now());
+        return res;
+      } finally { inFlightRecRef.current.delete(key); }
+    }));
+    await Promise.all([queryClient.invalidateQueries({ queryKey: keys.students }), queryClient.invalidateQueries({ queryKey: keys.cameraEvents })]);
+  }, [camera?.escolaId, camera?.id, keys.cameraEvents, keys.students, queryClient]);
+
+  const runFrame = useCallback(async () => {
+    if (inFlightRef.current) return;
+    const video = videoRef.current; const canvas = canvasRef.current; const faceapi = faceApiRef.current;
+    if (!video || !canvas || !faceapi || video.readyState < 2) return;
+    inFlightRef.current = true; setAnalyzing(true);
+    try {
+      const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions(FACE_API_ANALYSIS_OPTIONS)).withFaceLandmarks().withFaceDescriptors();
+      const ordered = [...detections].sort((a, b) => a.detection.box.x - b.detection.box.x).slice(0, MAX_FACES) as LiveFaceDetection[];
+      if (!ordered.length) { setFaces([]); setStatusMessage("Nenhum rosto detectado."); clearOverlay(canvas); return; }
+      const refs = refsRef.current;
+      const hasFaceApi = refs.some((r) => r.descriptors.some((v) => v.length === FACE_API_DESCRIPTOR_SIZE));
+      const hasLegacy = refs.some((r) => r.descriptors.some((v) => v.length !== FACE_API_DESCRIPTOR_SIZE));
+      const snapshots = dedupeFrameMatches(ordered.map((det, i) => {
+        const norm = normalizeDescriptor(det.descriptor);
+        const fa = createRecognitionDecision("face-api", norm, refs);
+        const leg = hasLegacy ? createRecognitionDecision("legacy", buildLegacyDescriptorFromVideo(video, det.detection.box, legacyCanvasRef.current), refs) : null;
+        const rec = pickBetterRecognition(leg, fa) ?? fa;
+        const conf = Number.isFinite(rec.distance) ? clamp(1 - rec.distance, 0, 1) : 0;
+        if (rec.matchStatus === "MATCHED" && rec.identityName) return { faceIndex: i + 1, label: rec.identityName, identityName: rec.identityName, identityKey: rec.identityKey, studentId: rec.studentId, confidence: conf, matchStatus: "MATCHED" as const, reviewReason: null, distance: rec.distance } satisfies RecognitionSnapshot;
+        if (rec.matchStatus === "REVIEW_REQUIRED") return { faceIndex: i + 1, label: rec.identityName ? `Revisão: ${rec.identityName}` : `Desconhecido ${i + 1}`, identityName: rec.identityName, identityKey: rec.identityKey, studentId: rec.studentId, confidence: conf, matchStatus: "REVIEW_REQUIRED" as const, reviewReason: rec.reviewReason, distance: rec.distance } satisfies RecognitionSnapshot;
+        return { faceIndex: i + 1, label: `Desconhecido ${i + 1}`, identityName: null, identityKey: null, studentId: null, confidence: conf, matchStatus: "UNMATCHED" as const, reviewReason: null, distance: rec.distance } satisfies RecognitionSnapshot;
+      }));
+      setFaces(snapshots);
+      setLastModelName(hasFaceApi ? "face-api.js" : hasLegacy ? "legacy-grayscale" : "face-api.js");
+      const m = snapshots.filter((s) => s.matchStatus === "MATCHED").length;
+      const r = snapshots.filter((s) => s.matchStatus === "REVIEW_REQUIRED").length;
+      const u = snapshots.filter((s) => s.matchStatus === "UNMATCHED").length;
+      setStatusMessage(refs.length ? `${snapshots.length} rosto(s): ${m} reconhecido(s), ${r} revisão, ${u} desconhecido(s).` : `${snapshots.length} rosto(s) detectado(s).`);
+      drawNativeOverlay(faceapi, video, canvas, ordered, snapshots);
+      void persistMatches(video, ordered, snapshots);
+    } catch (e) { console.error("Erro na análise:", e); }
+    finally { setAnalyzing(false); inFlightRef.current = false; }
+  }, [persistMatches]);
+
+  const startLoop = useCallback(() => {
+    const tick = (ts: number) => {
+      if (!activeRef.current) return;
+      if (ts - lastAnalysisAtRef.current >= DETECTION_INTERVAL_MS) { lastAnalysisAtRef.current = ts; void runFrame(); }
+      animationFrameRef.current = window.requestAnimationFrame(tick);
+    };
+    if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = window.requestAnimationFrame(tick);
+  }, [runFrame]);
+
+  const start = useCallback(async () => {
+    if (!camera) { setErrorMessage("Câmera não encontrada."); return; }
+    if (!navigator.mediaDevices?.getUserMedia) { setErrorMessage("Câmera não suportada neste dispositivo."); return; }
+    if (typeof window !== "undefined" && !window.isSecureContext && window.location.hostname !== "localhost") {
+      setErrorMessage("A câmera só funciona em HTTPS ou localhost."); return;
+    }
+    setState("loading"); setErrorMessage(null);
+    stopStream();
+    try {
+      const [faceApiEngine, stream] = await Promise.all([
+        getFaceApiEngine(),
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "user" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }),
+      ]);
+      if (!faceApiEngine) { setErrorMessage("Motor face-api.js não pôde ser carregado."); setState("error"); return; }
+      faceApiRef.current = faceApiEngine.faceapi;
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => undefined); }
+      activeRef.current = true;
+      setState("active");
+      const refCount = refsRef.current.length;
+      setStatusMessage(refCount ? `${refCount} identidade(s) carregada(s). Iniciando detecção...` : 'Câmera ativa. Rostos sem cadastro = "Desconhecido".');
+      startLoop(); void runFrame();
+    } catch (e) {
+      console.error("Erro ao iniciar câmera:", e);
+      setErrorMessage("Não foi possível iniciar a câmera. Verifique a permissão no navegador.");
+      setState("error");
+      stopStream();
+    }
+  }, [camera, runFrame, startLoop, stopStream]);
+
+  const stop = useCallback(() => {
+    stopStream();
+    setState("idle");
+  }, [stopStream]);
+
+  const restart = useCallback(() => {
+    stop();
+    setTimeout(() => void start(), 100);
+  }, [start, stop]);
+
+  // Cleanup ao desmontar
+  useEffect(() => () => stopStream(), [stopStream]);
+
+  return { state, faces, statusMessage, errorMessage, analyzing, lastModelName, videoRef, canvasRef, legacyCanvasRef, submissionCanvasRef, start, stop, restart };
+}
+
+// ─── Câmera USB inline card ───────────────────────────────────────────────────
+
+function UsbCameraCard({ camera, references, queryClient, keys, camEvents, school, autoStart }: {
+  camera: Camera;
+  references: LoadedRecognitionReference[];
+  queryClient: ReturnType<typeof useQueryClient>;
+  keys: ReturnType<typeof useTenantResourceKeyFactory>;
+  camEvents: { matchStatus: string }[];
+  school: { nome: string } | undefined;
+  autoStart: boolean;
+}) {
+  const live = useLiveCamera(camera, references, queryClient, keys);
+  const hasStarted = useRef(false);
+
+  // Auto-start quando câmera está ativa e autoStart=true
+  useEffect(() => {
+    if (!autoStart || hasStarted.current || camera.status !== "Ativa") return;
+    hasStarted.current = true;
+    void live.start();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, camera.status]);
+
+  const deleteMutation = useMutation({
+    mutationFn: deleteCamera,
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: keys.cameras }); toast.success("Câmera removida"); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Falha ao remover"),
+  });
+
+  const camMatched = camEvents.filter((e) => e.matchStatus === "MATCHED").length;
+  const isActive = live.state === "active";
+  const isLoading = live.state === "loading";
+
+  return (
+    <div className={cn("rounded-lg border bg-background/40 p-4 transition-colors", isActive ? "border-emerald-500/40" : "border-primary/10 hover:border-primary/30")}>
+      {/* Cabeçalho */}
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 min-w-0">
+          {isActive ? (
+            <span className="flex h-4 w-4 items-center justify-center"><span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" /></span>
+          ) : (
+            <CameraIcon className="h-4 w-4 text-muted-foreground/50" />
+          )}
+          <div className="min-w-0">
+            <div className="font-semibold text-sm truncate">{camera.nome}</div>
+            <div className="text-[11px] text-muted-foreground truncate">
+              {school?.nome ?? "Escola não vinculada"} • Webcam/USB
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {isActive && (
+            <span className="text-[10px] font-display tracking-widest font-semibold text-emerald-400">AO VIVO</span>
+          )}
+          {isLoading && (
+            <span className="text-[10px] font-display tracking-widest font-semibold text-amber-400 flex items-center gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" /> INICIANDO
+            </span>
+          )}
+          <StatusBadge variant={camera.status === "Ativa" ? "ok" : camera.status === "Manutenção" ? "manutencao" : "inativo"}>
+            {camera.status}
+          </StatusBadge>
+
+          {/* Controles */}
+          {!isActive && !isLoading && (
+            <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={() => void live.start()} title="Iniciar câmera">
+              <Play className="h-3 w-3" /> Iniciar
+            </Button>
+          )}
+          {isActive && (
+            <>
+              <Button size="sm" variant="outline" className="h-7 text-xs gap-1 border-rose-500/40 text-rose-400 hover:bg-rose-500/10" onClick={live.stop} title="Parar câmera">
+                <Square className="h-3 w-3" /> Parar
+              </Button>
+              <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={live.restart} title="Reiniciar câmera">
+                <RefreshCw className="h-3 w-3" /> Reiniciar
+              </Button>
+            </>
+          )}
+          {live.state === "error" && (
+            <Button size="sm" variant="outline" className="h-7 text-xs gap-1 border-amber-500/40 text-amber-400 hover:bg-amber-500/10" onClick={() => void live.start()} title="Tentar novamente">
+              <RefreshCw className="h-3 w-3" /> Tentar
+            </Button>
+          )}
+
+          <Link to="/cameras/cadastro" state={{ editCamera: camera }}>
+            <Button variant="ghost" size="icon" className="h-7 w-7" title="Editar"><Pencil className="h-3.5 w-3.5" /></Button>
+          </Link>
+          <Button variant="ghost" size="icon" className="h-7 w-7" title="Remover"
+            onClick={() => { if (window.confirm(`Remover ${camera.nome}?`)) deleteMutation.mutate(camera.id); }}>
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Vídeo ao vivo */}
+      {(isActive || isLoading) && (
+        <div className="mt-3 relative aspect-video bg-background border border-primary/20 rounded-lg overflow-hidden tech-grid scanline">
+          <video ref={live.videoRef} autoPlay muted playsInline
+            className={cn("absolute inset-0 z-10 h-full w-full object-cover scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
+          <canvas ref={live.canvasRef}
+            className={cn("absolute inset-0 z-20 h-full w-full pointer-events-none scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
+          <canvas ref={live.legacyCanvasRef} className="hidden" aria-hidden="true" />
+          <canvas ref={live.submissionCanvasRef} className="hidden" aria-hidden="true" />
+
+          {isActive && (
+            <>
+              <div className="absolute inset-0 z-30 bg-gradient-to-b from-black/10 via-transparent to-black/35" />
+              <div className="absolute top-2 left-2 z-40 flex items-center gap-1.5 bg-secondary/20 border border-secondary/50 px-2 py-1 rounded text-[10px] font-display tracking-wider">
+                <span className="h-1.5 w-1.5 rounded-full bg-secondary animate-pulse-soft" /> AO VIVO
+              </div>
+              <div className="absolute top-2 right-2 z-40 flex items-center gap-1.5 rounded border border-primary/30 bg-background/60 px-2 py-1 text-[10px] font-mono text-primary backdrop-blur-sm">
+                <ScanFace className="h-3 w-3" /> {live.lastModelName}
+                {live.analyzing && <Loader2 className="h-3 w-3 animate-spin text-secondary" />}
+              </div>
+              {live.statusMessage && (
+                <div className="absolute bottom-2 left-2 right-2 z-40 rounded border border-sky-200 bg-sky-50/90 px-2 py-1 text-[10px] text-sky-700 backdrop-blur-sm">
+                  {live.statusMessage}
+                </div>
+              )}
+            </>
+          )}
+          {isLoading && (
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2">
+              <Loader2 className="h-8 w-8 text-primary/60 animate-spin" />
+              <span className="font-display tracking-widest text-primary/80 text-xs">INICIANDO...</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Erro */}
+      {live.errorMessage && (
+        <div className="mt-2 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{live.errorMessage}</div>
+      )}
+
+      {/* Métricas */}
+      <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+          <div className="text-muted-foreground">DETECÇÕES HOJE</div>
+          <div className="font-semibold">{camMatched} / {camEvents.length}</div>
+        </div>
+        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+          <div className="text-muted-foreground">RESOLUÇÃO</div>
+          <div className="font-semibold">{camera.resolucao}</div>
+        </div>
+        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+          <div className="text-muted-foreground">ROSTOS ATIVOS</div>
+          <div className="font-semibold text-primary">{live.faces.length}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Câmera IP/RTSP card (gerida pelo gateway) ────────────────────────────────
+
+function NetworkCameraCard({ camera, school, camEvents, queryClient, keys }: {
+  camera: Camera;
+  school: { nome: string } | undefined;
+  camEvents: { matchStatus: string }[];
+  queryClient: ReturnType<typeof useQueryClient>;
+  keys: ReturnType<typeof useTenantResourceKeyFactory>;
+}) {
+  const runtime = cameraRuntimeLabel(camera.operacional?.status);
+  const camMatched = camEvents.filter((e) => e.matchStatus === "MATCHED").length;
+
+  const deleteMutation = useMutation({
+    mutationFn: deleteCamera,
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: keys.cameras }); toast.success("Câmera removida"); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Falha ao remover"),
+  });
+
+  return (
+    <div className="rounded-lg border border-primary/10 bg-background/40 p-4 hover:border-primary/30 transition-colors">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 min-w-0">
+          <HealthIcon status={camera.operacional?.status} />
+          <div className="min-w-0">
+            <div className="font-semibold text-sm truncate">{camera.nome}</div>
+            <div className="text-[11px] text-muted-foreground truncate">
+              {school?.nome ?? "Escola não vinculada"} • {camera.tipo} • {camera.localizacao || "Sem localização"}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={cn("text-[10px] font-display tracking-widest font-semibold", runtime.className)}>{runtime.label}</span>
+          <StatusBadge variant={camera.status === "Ativa" ? "ok" : camera.status === "Manutenção" ? "manutencao" : "inativo"}>
+            {camera.status}
+          </StatusBadge>
+          <Link to="/cameras/cadastro" state={{ editCamera: camera }}>
+            <Button variant="ghost" size="icon" className="h-7 w-7" title="Editar"><Pencil className="h-3.5 w-3.5" /></Button>
+          </Link>
+          <Button variant="ghost" size="icon" className="h-7 w-7" title="Remover"
+            onClick={() => { if (window.confirm(`Remover ${camera.nome}?`)) deleteMutation.mutate(camera.id); }}>
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+          <div className="text-muted-foreground">TIPO</div>
+          <div className="font-semibold">{camera.tipo}</div>
+        </div>
+        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+          <div className="text-muted-foreground">FPS</div>
+          <div className="font-semibold flex items-center gap-1">
+            {camera.operacional?.fpsMedido != null ? (
+              <><span className="text-emerald-400">{camera.operacional.fpsMedido}</span><span className="text-muted-foreground">/ {camera.fps}</span></>
+            ) : camera.fps}
+          </div>
+        </div>
+        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+          <div className="text-muted-foreground">DETECÇÕES HOJE</div>
+          <div className="font-semibold">{camMatched} / {camEvents.length}</div>
+        </div>
+        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+          <div className="text-muted-foreground">GATEWAY</div>
+          <div className="font-semibold truncate">{camera.operacional?.gatewayId ?? "—"}</div>
+        </div>
+      </div>
+
+      {camera.operacional && (
+        <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-muted-foreground">
+          {camera.operacional.ultimoHeartbeat && (
+            <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> Heartbeat: {timeAgo(camera.operacional.ultimoHeartbeat)}</span>
+          )}
+          {camera.operacional.ultimoFrame && (
+            <span className="flex items-center gap-1"><Zap className="h-3 w-3" /> Último frame: {timeAgo(camera.operacional.ultimoFrame)}</span>
+          )}
+          {camera.operacional.ultimoErro && (
+            <span className="flex items-center gap-1 text-rose-400"><XCircle className="h-3 w-3" /> {camera.operacional.ultimoErro}</span>
+          )}
+        </div>
+      )}
+
+      {(!camera.operacional || camera.operacional.status === "OFFLINE" || camera.operacional.status === "ERROR") && (
+        <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-400 flex items-center gap-2">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          Câmera gerida pelo Camera Gateway. Verifique se o gateway está em execução e a câmera está acessível.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Monitor Tab ──────────────────────────────────────────────────────────────
 
 function MonitorTab() {
@@ -325,20 +723,15 @@ function MonitorTab() {
   const camerasQuery = useQuery({ queryKey: keys.cameras, queryFn: listCameras, refetchInterval: 30_000 });
   const schoolsQuery = useQuery({ queryKey: keys.schools, queryFn: listSchools });
   const biometricReferencesQuery = useQuery({ queryKey: keys.biometricReferences, queryFn: listBiometricReferences, staleTime: 60_000 });
-  const eventsQuery = useQuery({ queryKey: [...keys.cameraEvents, now.toISOString().slice(0, 10)] as const, queryFn: () => listCameraEvents(now.toISOString().slice(0, 10)), refetchInterval: 15_000 });
   const biometricEventsQuery = useQuery({ queryKey: [...keys.cameraEvents, "biometric", now.toISOString().slice(0, 10)] as const, queryFn: () => listBiometricEvents({ data: now.toISOString().slice(0, 10) }), refetchInterval: 15_000 });
-
-  const deleteMutation = useMutation({
-    mutationFn: deleteCamera,
-    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: keys.cameras }); toast.success("Câmera removida"); },
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Falha ao remover"),
-  });
 
   const cameras = camerasQuery.data ?? [];
   const schools = schoolsQuery.data ?? [];
-  const references = biometricReferencesQuery.data ?? [];
-  const events = eventsQuery.data ?? [];
   const biometricEvents = biometricEventsQuery.data ?? [];
+  const references = useMemo(() => buildRecognitionReferences(biometricReferencesQuery.data ?? []), [biometricReferencesQuery.data]);
+
+  const usbCameras = cameras.filter((c) => c.tipo === "USB" || c.url === "device://live");
+  const networkCameras = cameras.filter((c) => c.tipo !== "USB" && c.url !== "device://live");
 
   const onlineCount = cameras.filter((c) => c.operacional?.status === "ONLINE").length;
   const offlineCount = cameras.filter((c) => !c.operacional?.status || c.operacional.status === "OFFLINE").length;
@@ -387,6 +780,7 @@ function MonitorTab() {
         </div>
         {totalDetections > 0 && (
           <div className="mt-3 h-2 rounded-full bg-muted overflow-hidden">
+            {/* eslint-disable-next-line react/forbid-component-props */}
             <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-secondary transition-all" style={{ width: `${Math.round((matchedDetections / totalDetections) * 100)}%` }} />
           </div>
         )}
@@ -395,162 +789,91 @@ function MonitorTab() {
         </div>
       </div>
 
-      {/* Lista de câmeras com saúde */}
-      <div className="glass-card p-4">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <CameraIcon className="h-4 w-4 text-primary" />
-            <h3 className="font-display font-semibold tracking-wide text-sm">CÂMERAS CADASTRADAS</h3>
-          </div>
-          <Link to="/cameras/cadastro">
-            <Button size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90 h-8 text-xs">
-              <Plus className="h-3 w-3 mr-1" />
-              Nova Câmera
-            </Button>
-          </Link>
-        </div>
-
-        {camerasQuery.isLoading ? (
-          <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-            <Loader2 className="h-4 w-4 animate-spin mr-2" /> Carregando câmeras...
-          </div>
-        ) : cameras.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground text-sm gap-2">
-            <CameraIcon className="h-8 w-8 opacity-30" />
-            <span>Nenhuma câmera cadastrada</span>
+      {/* Câmeras USB / Dispositivo */}
+      {usbCameras.length > 0 && (
+        <div className="glass-card p-4">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <CameraIcon className="h-4 w-4 text-primary" />
+              <h3 className="font-display font-semibold tracking-wide text-sm">CÂMERAS DO DISPOSITIVO</h3>
+              <span className="text-[10px] text-muted-foreground">(webcam / USB)</span>
+            </div>
             <Link to="/cameras/cadastro">
-              <Button size="sm" variant="outline">Cadastrar primeira câmera</Button>
+              <Button size="sm" variant="outline" className="h-7 text-xs">
+                <Plus className="h-3 w-3 mr-1" /> Nova
+              </Button>
             </Link>
           </div>
-        ) : (
-          <div className="space-y-2">
-            {cameras.map((camera) => {
+          <div className="space-y-3">
+            {usbCameras.map((camera) => {
               const school = schools.find((s) => s.id === camera.escolaId);
-              const runtime = cameraRuntimeLabel(camera.operacional?.status);
               const camRefs = references.filter((r) => r.schoolId === camera.escolaId);
               const camEvents = biometricEvents.filter((e) => e.cameraId === camera.id);
-              const camMatched = camEvents.filter((e) => e.matchStatus === "MATCHED").length;
-
               return (
-                <div key={camera.id} className="rounded-lg border border-primary/10 bg-background/40 p-4 hover:border-primary/30 transition-colors">
-                  <div className="flex items-start justify-between gap-3 flex-wrap">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <HealthIcon status={camera.operacional?.status} />
-                      <div className="min-w-0">
-                        <div className="font-semibold text-sm truncate">{camera.nome}</div>
-                        <div className="text-[11px] text-muted-foreground truncate">
-                          {school?.nome ?? "Escola não vinculada"} • {camera.localizacao || "Sem localização"}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className={cn("text-[10px] font-display tracking-widest font-semibold", runtime.className)}>
-                        {runtime.label}
-                      </span>
-                      <StatusBadge variant={camera.status === "Ativa" ? "ok" : camera.status === "Manutenção" ? "manutencao" : "inativo"}>
-                        {camera.status}
-                      </StatusBadge>
-                      <Link to="/cameras/cadastro" state={{ editCamera: camera }}>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title="Editar">
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
-                      </Link>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7"
-                        title="Remover"
-                        onClick={() => { if (window.confirm(`Remover ${camera.nome}?`)) deleteMutation.mutate(camera.id); }}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                      </Button>
-                    </div>
-                  </div>
-
-                  {/* Métricas inline */}
-                  <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-                    <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-                      <div className="text-muted-foreground tracking-wide">TIPO</div>
-                      <div className="font-semibold text-foreground">{camera.tipo}</div>
-                    </div>
-                    <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-                      <div className="text-muted-foreground tracking-wide">FPS</div>
-                      <div className="font-semibold text-foreground flex items-center gap-1">
-                        {camera.operacional?.fpsMedido != null ? (
-                          <>
-                            <span className="text-emerald-400">{camera.operacional.fpsMedido}</span>
-                            <span className="text-muted-foreground">/ {camera.fps}</span>
-                          </>
-                        ) : camera.fps}
-                      </div>
-                    </div>
-                    <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-                      <div className="text-muted-foreground tracking-wide">BIOMETRIAS</div>
-                      <div className="font-semibold text-foreground">{camRefs.length} identidade(s)</div>
-                    </div>
-                    <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-                      <div className="text-muted-foreground tracking-wide">DETECÇÕES HOJE</div>
-                      <div className="font-semibold text-foreground">{camMatched} / {camEvents.length}</div>
-                    </div>
-                  </div>
-
-                  {/* Timestamps de saúde */}
-                  {camera.operacional && (
-                    <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-muted-foreground">
-                      {camera.operacional.ultimoHeartbeat && (
-                        <span className="flex items-center gap-1">
-                          <Clock className="h-3 w-3" /> Heartbeat: {timeAgo(camera.operacional.ultimoHeartbeat)}
-                        </span>
-                      )}
-                      {camera.operacional.ultimoFrame && (
-                        <span className="flex items-center gap-1">
-                          <Zap className="h-3 w-3" /> Último frame: {timeAgo(camera.operacional.ultimoFrame)}
-                        </span>
-                      )}
-                      {camera.operacional.ultimoErro && (
-                        <span className="flex items-center gap-1 text-rose-400">
-                          <XCircle className="h-3 w-3" /> {camera.operacional.ultimoErro}
-                        </span>
-                      )}
-                      {camera.operacional.gatewayId && (
-                        <span className="flex items-center gap-1">
-                          <Wifi className="h-3 w-3" /> Gateway: {camera.operacional.gatewayId}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
+                <UsbCameraCard
+                  key={camera.id}
+                  camera={camera}
+                  references={camRefs}
+                  queryClient={queryClient}
+                  keys={keys}
+                  camEvents={camEvents}
+                  school={school}
+                  autoStart={camera.status === "Ativa"}
+                />
               );
             })}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Últimos eventos do dia */}
-      {events.length > 0 && (
+      {/* Câmeras IP / RTSP */}
+      {networkCameras.length > 0 && (
         <div className="glass-card p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Activity className="h-4 w-4 text-primary" />
-            <h3 className="font-display font-semibold tracking-wide text-sm">ÚLTIMOS EVENTOS DO DIA</h3>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Wifi className="h-4 w-4 text-primary" />
+              <h3 className="font-display font-semibold tracking-wide text-sm">CÂMERAS DE REDE</h3>
+              <span className="text-[10px] text-muted-foreground">(IP / RTSP / NVR)</span>
+            </div>
           </div>
-          <div className="space-y-1 max-h-48 overflow-y-auto">
-            {events.slice(0, 20).map((event) => (
-              <div key={event.id} className="flex items-center gap-3 px-3 py-2 rounded-lg border border-primary/10 bg-background/40 text-xs">
-                <StatusBadge variant={event.tipo === "Entrou" ? "presente" : "saiu"}>{event.tipo}</StatusBadge>
-                <span className="text-muted-foreground">{event.horario}</span>
-                <span className={cn("ml-auto text-[10px]", event.reconhecido ? "text-emerald-400" : "text-muted-foreground")}>
-                  {event.reconhecido ? `${Math.round((event.confianca ?? 0) * 100)}% confiança` : "Não identificado"}
-                </span>
-              </div>
-            ))}
+          <div className="space-y-3">
+            {networkCameras.map((camera) => {
+              const school = schools.find((s) => s.id === camera.escolaId);
+              const camEvents = biometricEvents.filter((e) => e.cameraId === camera.id);
+              return (
+                <NetworkCameraCard
+                  key={camera.id}
+                  camera={camera}
+                  school={school}
+                  camEvents={camEvents}
+                  queryClient={queryClient}
+                  keys={keys}
+                />
+              );
+            })}
           </div>
         </div>
       )}
+
+      {/* Estado vazio */}
+      {camerasQuery.isLoading ? (
+        <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+          <Loader2 className="h-4 w-4 animate-spin mr-2" /> Carregando câmeras...
+        </div>
+      ) : cameras.length === 0 ? (
+        <div className="glass-card p-8 flex flex-col items-center justify-center text-muted-foreground text-sm gap-3">
+          <CameraIcon className="h-12 w-12 opacity-30" />
+          <span>Nenhuma câmera cadastrada</span>
+          <Link to="/cameras/cadastro">
+            <Button size="sm" variant="outline">Cadastrar primeira câmera</Button>
+          </Link>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-// ─── Live Tab (câmera ao vivo com reconhecimento) ─────────────────────────────
+// ─── Live Tab (câmera ao vivo com reconhecimento — aba separada) ──────────────
 
 function LiveTab({ mode }: { mode: CamerasMode }) {
   const now = useNow();
@@ -558,29 +881,6 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
   const queryClient = useQueryClient();
   const [cameraId, setCameraId] = useState<string>("");
   const [escolaExpand, setEscolaExpand] = useState<string>("");
-  const [cameraLoading, setCameraLoading] = useState(false);
-  const [cameraActive, setCameraActive] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [statusMessage, setStatusMessage] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [faces, setFaces] = useState<RecognitionSnapshot[]>([]);
-  const [lastModelName, setLastModelName] = useState("face-api.js");
-
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
-  const lastAnalysisAtRef = useRef(0);
-  const inFlightRef = useRef(false);
-  const cameraActiveRef = useRef(false);
-  const faceApiRef = useRef<FaceApiModule | null>(null);
-  const legacyCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const submissionCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const recognitionReferencesRef = useRef<LoadedRecognitionReference[]>([]);
-  const recognitionCooldownRef = useRef<Map<string, number>>(new Map());
-  const recognitionInFlightRef = useRef<Set<string>>(new Set());
-  const autoStartedCameraIdRef = useRef<string | null>(null);
-  const activeRecognitionContextRef = useRef<{ cameraId: string | null; schoolId: string | null }>({ cameraId: null, schoolId: null });
 
   const schoolsQuery = useQuery({ queryKey: keys.schools, queryFn: listSchools });
   const camerasQuery = useQuery({ queryKey: keys.cameras, queryFn: listCameras });
@@ -592,172 +892,41 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
   useEffect(() => { if (!cameraId && camerasQuery.data?.[0]?.id) setCameraId(camerasQuery.data[0].id); }, [cameraId, camerasQuery.data]);
   useEffect(() => { if (!escolaExpand && schoolsQuery.data?.[0]?.id) setEscolaExpand(schoolsQuery.data[0].id); }, [escolaExpand, schoolsQuery.data]);
 
-  const recognitionReferences = useMemo(() => buildRecognitionReferences(biometricReferencesQuery.data ?? []), [biometricReferencesQuery.data]);
+  const references = useMemo(() => buildRecognitionReferences(biometricReferencesQuery.data ?? []), [biometricReferencesQuery.data]);
+  const camera = camerasQuery.data?.find((c) => c.id === cameraId) ?? camerasQuery.data?.[0];
+  const escola = schoolsQuery.data?.find((s) => s.id === camera?.escolaId);
+  const camRefs = useMemo(() => camera ? references.filter((r) => r.schoolId === camera.escolaId) : references, [camera, references]);
 
-  const scopedRecognitionReferences = useMemo(() => {
-    const activeSchoolId = (camerasQuery.data?.find((c) => c.id === cameraId) ?? camerasQuery.data?.[0])?.escolaId;
-    return activeSchoolId ? recognitionReferences.filter((r) => r.schoolId === activeSchoolId) : recognitionReferences;
-  }, [cameraId, camerasQuery.data, recognitionReferences]);
+  const live = useLiveCamera(camera, camRefs, queryClient, keys);
+  const runtime = cameraRuntimeLabel(camera?.operacional?.status);
 
-  useEffect(() => { recognitionReferencesRef.current = scopedRecognitionReferences; }, [scopedRecognitionReferences]);
+  const hasAutoStarted = useRef(false);
+  useEffect(() => {
+    if (mode !== "guard" || !camera?.id || hasAutoStarted.current) return;
+    hasAutoStarted.current = true;
+    void live.start();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera?.id, mode]);
 
-  const referenceCount = scopedRecognitionReferences.length;
-  const templateCount = useMemo(() => scopedRecognitionReferences.reduce((sum, r) => sum + r.descriptors.length, 0), [scopedRecognitionReferences]);
+  const matchedFacesCount = live.faces.filter((f) => f.matchStatus === "MATCHED").length;
+  const reviewFacesCount = live.faces.filter((f) => f.matchStatus === "REVIEW_REQUIRED").length;
+  const unknownFacesCount = live.faces.filter((f) => f.matchStatus === "UNMATCHED").length;
 
+  const referenceCount = camRefs.length;
+  const templateCount = useMemo(() => camRefs.reduce((sum, r) => sum + r.descriptors.length, 0), [camRefs]);
   const referenceMessage = useMemo(() => {
     if (biometricReferencesQuery.isLoading) return "Carregando biometrias...";
-    if (biometricReferencesQuery.isError) return "Falha ao carregar referências biométricas.";
-    if (!referenceCount) return 'Nenhuma biometria cadastrada. Rostos ficarão como "Desconhecido".';
-    return `${referenceCount} identidade(s) prontas para reconhecimento (${templateCount} template(s)).`;
+    if (biometricReferencesQuery.isError) return "Falha ao carregar referências.";
+    if (!referenceCount) return 'Nenhuma biometria cadastrada. Rostos = "Desconhecido".';
+    return `${referenceCount} identidade(s) prontas (${templateCount} template(s)).`;
   }, [biometricReferencesQuery.isError, biometricReferencesQuery.isLoading, referenceCount, templateCount]);
 
-  const camera = camerasQuery.data?.find((c) => c.id === cameraId) ?? camerasQuery.data?.[0];
-  const runtime = cameraRuntimeLabel(camera?.operacional?.status);
-  const escola = schoolsQuery.data?.find((s) => s.id === camera?.escolaId);
-
-  useEffect(() => { activeRecognitionContextRef.current = { cameraId: camera?.id ?? null, schoolId: camera?.escolaId ?? escola?.id ?? null }; }, [camera?.escolaId, camera?.id, escola?.id]);
-
+  const latestEvents = eventsQuery.data ?? [];
   const ausentes = useMemo(() => studentsQuery.data?.filter((s) => s.escolaId === escolaExpand && s.presencaHoje === "ausente") ?? [], [escolaExpand, studentsQuery.data]);
   const turmasEsc = useMemo(() => Array.from(new Set((studentsQuery.data ?? []).filter((s) => s.escolaId === escolaExpand).map((s) => s.turma))), [escolaExpand, studentsQuery.data]);
-  const latestEvents = eventsQuery.data ?? [];
-  const matchedFacesCount = faces.filter((f) => f.matchStatus === "MATCHED").length;
-  const reviewFacesCount = faces.filter((f) => f.matchStatus === "REVIEW_REQUIRED").length;
-  const unknownFacesCount = faces.filter((f) => f.matchStatus === "UNMATCHED").length;
 
-  const stopAnimationLoop = useCallback(() => {
-    if (animationFrameRef.current !== null) { window.cancelAnimationFrame(animationFrameRef.current); animationFrameRef.current = null; }
-  }, []);
-
-  const resetLiveState = useCallback(() => {
-    stopAnimationLoop();
-    inFlightRef.current = false; lastAnalysisAtRef.current = 0; cameraActiveRef.current = false; autoStartedCameraIdRef.current = null;
-    setAnalyzing(false); setCameraActive(false); setFaces([]); setLastModelName("face-api.js");
-    clearOverlay(canvasRef.current);
-  }, [stopAnimationLoop]);
-
-  const stopCamera = useCallback(() => {
-    const stream = streamRef.current;
-    streamRef.current = null;
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    if (videoRef.current) videoRef.current.srcObject = null;
-    resetLiveState();
-  }, [resetLiveState]);
-
-  const ensureRecognitionReferences = useCallback(async (schoolId?: string | null) => {
-    if (recognitionReferencesRef.current.length > 0) return recognitionReferencesRef.current;
-    try {
-      const response = await biometricReferencesQuery.refetch();
-      const built = buildRecognitionReferences(response.data ?? []);
-      const activeSchoolId = schoolId ?? activeRecognitionContextRef.current.schoolId;
-      const scoped = activeSchoolId ? built.filter((r) => r.schoolId === activeSchoolId) : built;
-      recognitionReferencesRef.current = scoped;
-      return scoped;
-    } catch { return recognitionReferencesRef.current; }
-  }, [biometricReferencesQuery]);
-
-  const persistMatchedRecognitions = useCallback(async (params: { video: HTMLVideoElement; detections: LiveFaceDetection[]; snapshots: RecognitionSnapshot[] }) => {
-    const { cameraId: activeCameraId, schoolId: activeSchoolId } = activeRecognitionContextRef.current;
-    if (!activeCameraId || !activeSchoolId) return;
-    const matchedPairs = params.snapshots.map((s, i) => ({ snapshot: s, detection: params.detections[i] }))
-      .filter((e): e is { snapshot: RecognitionSnapshot; detection: LiveFaceDetection } => Boolean(e.detection) && e.snapshot.matchStatus === "MATCHED" && Boolean(e.snapshot.identityKey));
-    if (!matchedPairs.length) return;
-    const results = await Promise.allSettled(matchedPairs.map(async ({ snapshot, detection }) => {
-      const key = snapshot.identityKey!;
-      const now = Date.now();
-      if (recognitionInFlightRef.current.has(key) || now - (recognitionCooldownRef.current.get(key) ?? 0) < RECOGNITION_SUBMIT_COOLDOWN_MS) return false;
-      const imagemBase64 = captureRecognitionCrop(params.video, detection.detection.box, submissionCanvasRef.current);
-      if (!imagemBase64) return false;
-      recognitionInFlightRef.current.add(key);
-      try {
-        const res = await registerCameraRecognition({ cameraId: activeCameraId, schoolId: activeSchoolId, imagemBase64, expectedStudentId: snapshot.studentId ?? undefined, direcao: "ENTRY", reconhecidoEm: new Date().toISOString(), metadata: { source: "cameras-live", localIdentityKey: key, localStudentId: snapshot.studentId, localConfidence: snapshot.confidence } });
-        recognitionCooldownRef.current.set(key, Date.now());
-        return res;
-      } catch { return false; } finally { recognitionInFlightRef.current.delete(key); }
-    }));
-    if (results.some((r) => r.status === "fulfilled" && Boolean(r.value) && (r.value as Record<string, unknown>).duplicate !== true)) {
-      await Promise.all([queryClient.invalidateQueries({ queryKey: keys.students }), queryClient.invalidateQueries({ queryKey: keys.cameraEvents })]);
-    }
-  }, [keys.cameraEvents, keys.students, queryClient]);
-
-  const runFrameAnalysis = useCallback(async () => {
-    if (inFlightRef.current) return;
-    const video = videoRef.current; const canvas = canvasRef.current; const faceapi = faceApiRef.current;
-    if (!video || !canvas || !faceapi || video.readyState < 2) return;
-    inFlightRef.current = true; setAnalyzing(true);
-    try {
-      const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions(FACE_API_ANALYSIS_OPTIONS)).withFaceLandmarks().withFaceDescriptors();
-      const ordered = [...detections].sort((a, b) => a.detection.box.x - b.detection.box.x).slice(0, MAX_FACES) as LiveFaceDetection[];
-      if (!ordered.length) { setFaces([]); setStatusMessage("Nenhum rosto detectado."); clearOverlay(canvas); return; }
-      const refs = recognitionReferencesRef.current;
-      const hasFaceApi = refs.some((r) => r.descriptors.some((v) => v.length === FACE_API_DESCRIPTOR_SIZE));
-      const hasLegacy = refs.some((r) => r.descriptors.some((v) => v.length !== FACE_API_DESCRIPTOR_SIZE));
-      const snapshots = dedupeFrameMatches(ordered.map((det, i) => {
-        const norm = normalizeDescriptor(det.descriptor);
-        const fa = createRecognitionDecision("face-api", norm, refs);
-        const leg = hasLegacy ? createRecognitionDecision("legacy", buildLegacyDescriptorFromVideo(video, det.detection.box, legacyCanvasRef.current), refs) : null;
-        const rec = pickBetterRecognition(leg, fa) ?? fa;
-        const conf = Number.isFinite(rec.distance) ? clamp(1 - rec.distance, 0, 1) : 0;
-        if (rec.matchStatus === "MATCHED" && rec.identityName) return { faceIndex: i + 1, label: rec.identityName, identityName: rec.identityName, identityKey: rec.identityKey, studentId: rec.studentId, confidence: conf, matchStatus: "MATCHED" as const, reviewReason: null, distance: rec.distance } satisfies RecognitionSnapshot;
-        if (rec.matchStatus === "REVIEW_REQUIRED") return { faceIndex: i + 1, label: rec.identityName ? `Revisão: ${rec.identityName}` : `Desconhecido ${i + 1}`, identityName: rec.identityName, identityKey: rec.identityKey, studentId: rec.studentId, confidence: conf, matchStatus: "REVIEW_REQUIRED" as const, reviewReason: rec.reviewReason, distance: rec.distance } satisfies RecognitionSnapshot;
-        return { faceIndex: i + 1, label: `Desconhecido ${i + 1}`, identityName: null, identityKey: null, studentId: null, confidence: conf, matchStatus: "UNMATCHED" as const, reviewReason: null, distance: rec.distance } satisfies RecognitionSnapshot;
-      }));
-      setFaces(snapshots); setLastModelName(hasFaceApi ? "face-api.js" : hasLegacy ? "legacy-grayscale" : "face-api.js");
-      const m = snapshots.filter((s) => s.matchStatus === "MATCHED").length;
-      const r = snapshots.filter((s) => s.matchStatus === "REVIEW_REQUIRED").length;
-      const u = snapshots.filter((s) => s.matchStatus === "UNMATCHED").length;
-      setStatusMessage(refs.length ? `${snapshots.length} rosto(s). ${m} reconhecido(s), ${r} em revisão, ${u} desconhecido(s).` : `${snapshots.length} rosto(s) detectado(s). Cadastre biometrias para identificação.`);
-      drawNativeOverlay(faceapi, video, canvas, ordered, snapshots);
-      void persistMatchedRecognitions({ video, detections: ordered, snapshots });
-    } catch (e) { console.error("Erro na análise:", e); setError("Falha ao analisar o vídeo."); setFaces([]); clearOverlay(canvas); }
-    finally { setAnalyzing(false); inFlightRef.current = false; }
-  }, [persistMatchedRecognitions]);
-
-  const startAnimationLoop = useCallback(() => {
-    const tick = (ts: number) => {
-      if (!cameraActiveRef.current) return;
-      if (ts - lastAnalysisAtRef.current >= DETECTION_INTERVAL_MS) { lastAnalysisAtRef.current = ts; void runFrameAnalysis(); }
-      animationFrameRef.current = window.requestAnimationFrame(tick);
-    };
-    stopAnimationLoop(); animationFrameRef.current = window.requestAnimationFrame(tick);
-  }, [runFrameAnalysis, stopAnimationLoop]);
-
-  const startCamera = useCallback(async () => {
-    if (!navigator.mediaDevices?.getUserMedia) { setError("Câmera não suportada neste dispositivo."); return; }
-    if (typeof window !== "undefined" && !window.isSecureContext && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") { setError("A câmera só funciona em HTTPS ou localhost."); return; }
-    try {
-      setCameraLoading(true); setError(null); stopCamera(); setStatusMessage("Preparando câmera...");
-      const fallbackSchoolId = camera?.escolaId ?? escolaExpand ?? schoolsQuery.data?.[0]?.id ?? null;
-      if (!fallbackSchoolId) { setError("Selecione ou cadastre uma escola."); return; }
-      const resolvedCamera = camera ?? null;
-      if (!resolvedCamera) { setError("Nenhuma câmera encontrada."); return; }
-      activeRecognitionContextRef.current = { cameraId: resolvedCamera.id, schoolId: resolvedCamera.escolaId };
-      recognitionReferencesRef.current = [];
-      setCameraId(resolvedCamera.id);
-      await queryClient.invalidateQueries({ queryKey: keys.cameras });
-      const [faceApiEngine, stream, refs] = await Promise.all([
-        getFaceApiEngine(),
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "user" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }),
-        ensureRecognitionReferences(resolvedCamera.escolaId),
-      ]);
-      if (!faceApiEngine) { setError("Motor face-api.js não pôde ser carregado."); stopCamera(); return; }
-      faceApiRef.current = faceApiEngine.faceapi; recognitionReferencesRef.current = refs; streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => undefined); }
-      cameraActiveRef.current = true; autoStartedCameraIdRef.current = resolvedCamera.id; setCameraActive(true);
-      setStatusMessage(refs.length ? `${refs.length} identidade(s) carregada(s).` : 'Câmera iniciada. Rostos sem cadastro aparecerão como "Desconhecido".');
-      startAnimationLoop(); void runFrameAnalysis();
-    } catch (e) { console.error("Erro ao iniciar câmera:", e); setError("Não foi possível iniciar a câmera. Verifique a permissão."); stopCamera(); }
-    finally { setCameraLoading(false); }
-  }, [camera, escolaExpand, ensureRecognitionReferences, keys.cameras, queryClient, runFrameAnalysis, schoolsQuery.data, startAnimationLoop, stopCamera]);
-
-  // Auto-start no modo guard
-  useEffect(() => {
-    if (mode !== "guard" || !camera?.id || cameraLoading || cameraActive) return;
-    if (autoStartedCameraIdRef.current === camera.id) return;
-    setError(null); void startCamera();
-  }, [camera?.id, cameraActive, cameraLoading, mode, startCamera]);
-
-  useEffect(() => () => { stopCamera(); }, [stopCamera]);
-  useEffect(() => { if (!cameraActive) clearOverlay(canvasRef.current); }, [cameraActive]);
+  const isActive = live.state === "active";
+  const isLoading = live.state === "loading";
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
@@ -786,37 +955,38 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
         </div>
 
         <div className="relative aspect-video bg-background border border-primary/30 rounded-lg overflow-hidden tech-grid scanline">
-          <video ref={videoRef} autoPlay muted playsInline className={cn("absolute inset-0 z-10 h-full w-full object-cover scale-x-[-1] transition-opacity duration-300", cameraActive ? "opacity-100" : "opacity-0")} />
-          <canvas ref={canvasRef} className={cn("absolute inset-0 z-20 h-full w-full pointer-events-none scale-x-[-1] transition-opacity duration-300", cameraActive ? "opacity-100" : "opacity-0")} />
-          <canvas ref={legacyCanvasRef} className="hidden" aria-hidden="true" />
-          <canvas ref={submissionCanvasRef} className="hidden" aria-hidden="true" />
+          <video ref={live.videoRef} autoPlay muted playsInline className={cn("absolute inset-0 z-10 h-full w-full object-cover scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
+          <canvas ref={live.canvasRef} className={cn("absolute inset-0 z-20 h-full w-full pointer-events-none scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
+          <canvas ref={live.legacyCanvasRef} className="hidden" aria-hidden="true" />
+          <canvas ref={live.submissionCanvasRef} className="hidden" aria-hidden="true" />
 
-          {cameraActive ? (
+          {isActive ? (
             <>
               <div className="absolute inset-0 z-30 bg-gradient-to-b from-black/10 via-transparent to-black/35" />
               <div className="absolute top-3 left-3 z-40 flex items-center gap-1.5 bg-secondary/20 border border-secondary/50 px-2 py-1 rounded text-xs font-display tracking-wider">
                 <span className="h-1.5 w-1.5 rounded-full bg-secondary animate-pulse-soft" /> AO VIVO
               </div>
               <div className="absolute top-3 right-3 z-40 flex items-center gap-2 rounded border border-primary/30 bg-background/60 px-2 py-1 text-xs font-mono text-primary backdrop-blur-sm">
-                <ScanFace className="h-3.5 w-3.5" /> {lastModelName} {analyzing && <Loader2 className="h-3.5 w-3.5 animate-spin text-secondary" />}
+                <ScanFace className="h-3.5 w-3.5" /> {live.lastModelName} {live.analyzing && <Loader2 className="h-3.5 w-3.5 animate-spin text-secondary" />}
               </div>
-              <div className="absolute bottom-3 left-3 right-3 z-40 rounded-lg border px-3 py-2 text-xs backdrop-blur-sm border-sky-200 bg-sky-50 text-sky-700">{statusMessage}</div>
+              {live.statusMessage && (
+                <div className="absolute bottom-3 left-3 right-3 z-40 rounded-lg border px-3 py-2 text-xs backdrop-blur-sm border-sky-200 bg-sky-50 text-sky-700">{live.statusMessage}</div>
+              )}
             </>
           ) : (
             <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 px-4 text-center">
-              {mode === "guard" ? (
+              {isLoading ? (
                 <>
                   <Loader2 className="h-12 w-12 text-primary/60 animate-spin" />
-                  <span className="font-display tracking-widest text-primary/80 text-sm">{cameraLoading ? "INICIANDO VIGIA" : "AGUARDANDO CÂMERA"}</span>
-                  <p className="max-w-sm text-xs text-muted-foreground">{cameraLoading ? "Carregando modelos de reconhecimento facial..." : "Selecione uma câmera no seletor acima."}</p>
+                  <span className="font-display tracking-widest text-primary/80 text-sm">INICIANDO CÂMERA</span>
+                  <p className="max-w-sm text-xs text-muted-foreground">Carregando modelos de reconhecimento facial...</p>
                 </>
               ) : (
                 <>
                   <CameraIcon className="h-12 w-12 text-primary/60" />
-                  <span className="font-display tracking-widest text-primary/80 text-sm">{cameraLoading ? "ABRINDO CÂMERA" : "AO VIVO"}</span>
-                  <p className="max-w-sm text-xs text-muted-foreground">{cameraLoading ? "Preparando reconhecimento facial..." : "Clique em iniciar para abrir a câmera."}</p>
-                  <Button onClick={startCamera} className="bg-primary text-primary-foreground hover:bg-primary/90" type="button" disabled={cameraLoading}>
-                    <CameraIcon className="h-4 w-4 mr-1" /> {cameraLoading ? "Abrindo..." : "Iniciar câmera ao vivo"}
+                  <span className="font-display tracking-widest text-primary/80 text-sm">CÂMERA PARADA</span>
+                  <Button onClick={() => void live.start()} className="bg-primary text-primary-foreground hover:bg-primary/90" type="button">
+                    <Play className="h-4 w-4 mr-1" /> Iniciar câmera
                   </Button>
                 </>
               )}
@@ -831,7 +1001,7 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
         <div className="grid grid-cols-3 gap-3 mt-3">
           <div className="rounded-lg border border-primary/15 bg-background/40 p-2">
             <div className="text-[10px] font-display tracking-widest text-muted-foreground">DETECÇÕES</div>
-            <div className="font-display text-xl font-bold text-primary">{faces.length}</div>
+            <div className="font-display text-xl font-bold text-primary">{live.faces.length}</div>
           </div>
           <div className="rounded-lg border border-secondary/30 bg-secondary/10 p-2">
             <div className="text-[10px] font-display tracking-widest text-muted-foreground">RECONHECIDOS</div>
@@ -845,34 +1015,32 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
 
         <div className="mt-3 rounded-lg border border-dashed border-border bg-background/50 px-4 py-3 text-xs text-muted-foreground">{referenceMessage}</div>
 
-        <div className="flex flex-wrap items-center gap-3 mt-3">
-          {mode === "guard" ? (
-            cameraActive ? (
-              <Button type="button" variant="outline" onClick={stopCamera}><CameraOff className="mr-2 h-4 w-4" /> Parar vigia</Button>
-            ) : (
-              <Button type="button" onClick={startCamera} disabled={cameraLoading}>
-                {cameraLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CameraIcon className="mr-2 h-4 w-4" />}
-                {cameraLoading ? "Iniciando..." : "Reiniciar vigia"}
-              </Button>
-            )
-          ) : (
+        <div className="flex flex-wrap items-center gap-2 mt-3">
+          {!isActive && !isLoading && (
+            <Button type="button" onClick={() => void live.start()}>
+              <Play className="mr-2 h-4 w-4" /> Iniciar câmera
+            </Button>
+          )}
+          {isActive && (
             <>
-              {!cameraActive ? (
-                <Button type="button" onClick={startCamera} disabled={cameraLoading}>
-                  {cameraLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CameraIcon className="mr-2 h-4 w-4" />}
-                  Iniciar câmera ao vivo
-                </Button>
-              ) : (
-                <Button type="button" variant="outline" onClick={stopCamera}><CameraOff className="mr-2 h-4 w-4" /> Parar câmera</Button>
-              )}
-              <Button type="button" variant="outline" onClick={() => { setError(null); stopCamera(); setFaces([]); }}>
-                <Loader2 className="mr-2 h-4 w-4" /> Reiniciar
+              <Button type="button" variant="outline" onClick={live.stop} className="border-rose-500/40 text-rose-400 hover:bg-rose-500/10">
+                <Square className="mr-2 h-4 w-4" /> Parar
+              </Button>
+              <Button type="button" variant="outline" onClick={live.restart}>
+                <RefreshCw className="mr-2 h-4 w-4" /> Reiniciar
               </Button>
             </>
           )}
+          {isLoading && (
+            <Button type="button" variant="outline" disabled>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Iniciando...
+            </Button>
+          )}
         </div>
 
-        {error && <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+        {live.errorMessage && (
+          <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{live.errorMessage}</div>
+        )}
       </div>
 
       {/* Painel lateral: atividade em tempo real */}
@@ -891,7 +1059,7 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
             return (
               <li key={event.id} className="flex items-center gap-3 p-2 rounded-lg border border-primary/10 bg-background/40 hover:border-primary/30">
                 <div className="relative">
-                  <img src={student.foto} className="h-10 w-10 rounded-full bg-muted border border-primary/30 object-cover" />
+                  <img src={student.foto} alt={student.nome} className="h-10 w-10 rounded-full bg-muted border border-primary/30 object-cover" />
                   <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card bg-secondary" />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -908,7 +1076,6 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
           {eventsQuery.isLoading && <li className="text-sm text-muted-foreground">Carregando atividades...</li>}
         </ul>
 
-        {/* Monitor de turmas */}
         <div className="mt-4 pt-4 border-t border-primary/10">
           <div className="flex items-center justify-between mb-2">
             <h4 className="font-display text-xs font-semibold tracking-wide">TURMAS</h4>
@@ -969,11 +1136,10 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
         }
       />
 
-      {/* Tabs */}
       <div className="flex gap-1 mb-4 border-b border-primary/10">
         {([
           { value: "monitor", label: "Monitoramento & Saúde" },
-          { value: "live", label: "Câmera ao Vivo" },
+          { value: "live", label: "Câmera ao Vivo (teste)" },
         ] as { value: ViewTab; label: string }[]).map(({ value, label }) => (
           <button
             key={value}
