@@ -6,6 +6,7 @@ import type {
   AppSettings,
   AuthSession,
   Camera,
+  CameraDiscoveryCandidate,
   DashboardData,
   Escola,
   EventoCamera,
@@ -213,6 +214,14 @@ export async function updatePresence(
 
 export async function listCameras() {
   return unwrapList<Camera>(await apiRequest<unknown>("/cameras"));
+}
+
+export async function discoverCameras() {
+  const response = await apiRequest<unknown>("/cameras/discover");
+  if (response && typeof response === "object" && Array.isArray((response as Record<string, unknown>).cameras)) {
+    return (response as { cameras: CameraDiscoveryCandidate[] }).cameras;
+  }
+  return unwrapList<CameraDiscoveryCandidate>(response);
 }
 
 export async function createCamera(payload: Partial<Camera>) {

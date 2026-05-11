@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Camera, Laptop, Network, Pencil, Save, Trash2, Wifi } from "lucide-react";
+import { ArrowLeft, Camera, Loader2, Laptop, Network, Pencil, Radar, Save, Trash2, Wifi } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -10,9 +10,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useTenantResourceKeyFactory } from "@/context/auth-context";
-import type { Camera as CameraEntity } from "@/lib/domain";
-import { createCamera, deleteCamera, ensureDeviceCameraSource, listCameras, listSchools, updateCamera } from "@/lib/resources";
+import type { Camera as CameraEntity, CameraDiscoveryCandidate } from "@/lib/domain";
+import { createCamera, deleteCamera, discoverCameras, ensureDeviceCameraSource, listCameras, listSchools, updateCamera } from "@/lib/resources";
 import { cn } from "@/lib/utils";
+
+type NetworkProfile = "manual" | "xm-h264dvr";
 
 type CameraForm = {
   id?: string;
@@ -22,6 +24,9 @@ type CameraForm = {
   tipo: CameraEntity["tipo"];
   url: string;
   porta: number;
+  perfilRede: NetworkProfile;
+  canal: number;
+  stream: "main" | "sub";
   resolucao: CameraEntity["resolucao"];
   fps: number;
   status: CameraEntity["status"];
@@ -36,6 +41,9 @@ const emptyForm: CameraForm = {
   tipo: "USB",
   url: "",
   porta: 554,
+  perfilRede: "manual",
+  canal: 1,
+  stream: "main",
   resolucao: "1080p",
   fps: 30,
   status: "Ativa",
@@ -64,11 +72,59 @@ const CAMERA_TYPES = [
   },
 ];
 
+const NETWORK_PROFILES = [
+  {
+    value: "manual" as const,
+    label: "Manual / generico",
+    description: "Use uma URL RTSP ou HTTP informada pelo fabricante",
+  },
+  {
+    value: "xm-h264dvr" as const,
+    label: "H264DVR / XM / iCSee",
+    description: "Perfil para cameras Wi-Fi com web viewer VideoPlayTool",
+  },
+];
+
+function stripProtocol(value: string) {
+  return value.trim().replace(/^[a-z]+:\/\//i, "").split("/")[0].split("@").pop() ?? "";
+}
+
+function buildNetworkUrl(form: CameraForm) {
+  const rawUrl = form.url.trim();
+  if (form.tipo !== "RTSP" || form.perfilRede !== "xm-h264dvr") {
+    return rawUrl;
+  }
+
+  const host = stripProtocol(rawUrl).split(":")[0];
+  if (!host) {
+    return rawUrl;
+  }
+
+  const port = Number(form.porta || 554);
+  const channel = Number(form.canal || 1);
+  const stream = form.stream === "sub" ? 1 : 0;
+  return `rtsp://${host}:${port}/user={username}_password={password}_channel=${channel}_stream=${stream}.sdp?real_stream`;
+}
+
+function inferNetworkProfile(url: string): Pick<CameraForm, "perfilRede" | "canal" | "stream"> {
+  const match = url.match(/_channel=(\d+)_stream=(\d+)/i);
+  if (!match) {
+    return { perfilRede: "manual", canal: 1, stream: "main" };
+  }
+
+  return {
+    perfilRede: "xm-h264dvr",
+    canal: Number(match[1]) || 1,
+    stream: match[2] === "1" ? "sub" : "main",
+  };
+}
+
 export default function CameraCadastro() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const keys = useTenantResourceKeyFactory();
   const [form, setForm] = useState<CameraForm>(emptyForm);
+  const [discoveredCameras, setDiscoveredCameras] = useState<CameraDiscoveryCandidate[]>([]);
 
   const schoolsQuery = useQuery({ queryKey: keys.schools, queryFn: listSchools });
   const camerasQuery = useQuery({ queryKey: keys.cameras, queryFn: listCameras });
@@ -131,10 +187,25 @@ export default function CameraCadastro() {
     onError: (error) => toast.error(error instanceof Error ? error.message : "Falha ao remover câmera"),
   });
 
+  const discoverMutation = useMutation({
+    mutationFn: discoverCameras,
+    onSuccess: (cameras) => {
+      setDiscoveredCameras(cameras);
+      if (cameras.length === 0) {
+        toast.info("Nenhuma camera encontrada na rede local");
+        return;
+      }
+
+      toast.success(`${cameras.length} dispositivo(s) encontrado(s)`);
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Falha ao buscar cameras na rede"),
+  });
+
   const activeCameras = useMemo(() => camerasQuery.data ?? [], [camerasQuery.data]);
   const isPending = createMutation.isPending || updateMutation.isPending || ensureDeviceMutation.isPending;
   const isDevice = form.tipo === "USB";
   const isNetwork = form.tipo === "IP" || form.tipo === "RTSP";
+  const resolvedStreamUrl = isDevice ? "device://live" : buildNetworkUrl(form);
 
   const setTipo = (tipo: CameraEntity["tipo"]) => {
     setForm({
@@ -143,23 +214,47 @@ export default function CameraCadastro() {
       tipo,
       nome: tipo === "USB" ? "Câmera do dispositivo" : "",
       porta: tipo === "RTSP" ? 554 : tipo === "IP" ? 80 : 554,
+      perfilRede: tipo === "RTSP" ? "xm-h264dvr" : "manual",
+      canal: 1,
+      stream: "main",
     });
   };
 
   const startEdit = (camera: CameraEntity) => {
+    const profile = inferNetworkProfile(camera.url);
     setForm({
       id: camera.id,
       nome: camera.nome,
       escolaId: camera.escolaId,
       localizacao: camera.localizacao,
       tipo: camera.tipo,
-      url: camera.url,
+      url: profile.perfilRede === "xm-h264dvr" ? stripProtocol(camera.url).split(":")[0] : camera.url,
       porta: Number((camera.url.split(":").slice(-1)[0] || "554").split("/")[0]) || 554,
+      perfilRede: profile.perfilRede,
+      canal: profile.canal,
+      stream: profile.stream,
       resolucao: camera.resolucao,
       fps: camera.fps,
       status: camera.status,
       usuario: camera.usuario ?? "",
       senha: camera.senha ?? "",
+    });
+  };
+
+  const useDiscoveredCamera = (camera: CameraDiscoveryCandidate) => {
+    const rtspPort = camera.ports.includes(554) ? 554 : camera.ports.includes(8554) ? 8554 : 554;
+    const profile: NetworkProfile = camera.profile === "xm-h264dvr" ? "xm-h264dvr" : "manual";
+
+    setForm({
+      ...form,
+      tipo: camera.profile === "ip" ? "IP" : "RTSP",
+      perfilRede: profile,
+      url: camera.ip,
+      porta: rtspPort,
+      canal: 1,
+      stream: "main",
+      usuario: form.usuario || (profile === "xm-h264dvr" ? "yura" : ""),
+      localizacao: form.localizacao || "Camera encontrada na rede",
     });
   };
 
@@ -171,15 +266,20 @@ export default function CameraCadastro() {
       return;
     }
 
-    if (isNetwork && !form.url.trim()) {
+    if (isNetwork && !resolvedStreamUrl.trim()) {
       toast.error("Informe a URL ou endereço IP da câmera");
+      return;
+    }
+
+    if (form.perfilRede === "xm-h264dvr" && (!form.usuario.trim() || !form.senha.trim())) {
+      toast.error("Informe usuario e senha para cameras H264DVR / XM / iCSee");
       return;
     }
 
     if (form.id) {
       updateMutation.mutate({
         ...form,
-        url: isDevice ? "device://live" : form.url,
+        url: resolvedStreamUrl,
         fps: Number(form.fps || 30),
       });
       return;
@@ -190,7 +290,7 @@ export default function CameraCadastro() {
       return;
     }
 
-    createMutation.mutate({ ...form, fps: Number(form.fps || 30) });
+    createMutation.mutate({ ...form, url: resolvedStreamUrl, fps: Number(form.fps || 30) });
   };
 
   return (
@@ -294,14 +394,74 @@ export default function CameraCadastro() {
           {isNetwork && (
             <div className="space-y-4 rounded-lg border border-primary/20 bg-primary/5 p-4">
               <p className="text-xs font-display tracking-widest text-muted-foreground">CONFIGURAÇÃO DE REDE</p>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => discoverMutation.mutate()}
+                  disabled={discoverMutation.isPending}
+                >
+                  {discoverMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                  ) : (
+                    <Radar className="h-4 w-4 mr-1" />
+                  )}
+                  Buscar na rede
+                </Button>
+              </div>
+              {discoveredCameras.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {discoveredCameras.map((camera) => (
+                    <button
+                      key={camera.ip}
+                      type="button"
+                      onClick={() => useDiscoveredCamera(camera)}
+                      className="rounded-md border border-primary/20 bg-background/70 p-3 text-left hover:border-primary/60 hover:bg-primary/10 transition-colors"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-sm">{camera.ip}</span>
+                        <span className="text-[10px] text-primary">{camera.label}</span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground mt-1">
+                        Portas: {camera.ports.join(", ")}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {form.tipo === "RTSP" && (
+                  <div className="md:col-span-2">
+                    <Label>Perfil de conexao</Label>
+                    <Select
+                      value={form.perfilRede}
+                      onValueChange={(v) => setForm({ ...form, perfilRede: v as NetworkProfile })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {NETWORK_PROFILES.map((profile) => (
+                          <SelectItem key={profile.value} value={profile.value}>{profile.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      {NETWORK_PROFILES.find((profile) => profile.value === form.perfilRede)?.description}
+                    </p>
+                  </div>
+                )}
                 <div className="md:col-span-2">
-                  <Label>{form.tipo === "RTSP" ? "URL RTSP *" : "Endereço IP / URL *"}</Label>
+                  <Label>{form.perfilRede === "xm-h264dvr" ? "IP da camera *" : form.tipo === "RTSP" ? "URL RTSP *" : "Endereço IP / URL *"}</Label>
                   <Input
-                    placeholder={form.tipo === "RTSP" ? "rtsp://192.168.0.10:554/stream" : "192.168.0.10 ou http://192.168.0.10/video"}
+                    placeholder={form.perfilRede === "xm-h264dvr" ? "192.168.0.106" : form.tipo === "RTSP" ? "rtsp://192.168.0.10:554/stream" : "192.168.0.10 ou http://192.168.0.10/video"}
                     value={form.url}
                     onChange={(e) => setForm({ ...form, url: e.target.value })}
                   />
+                  {form.perfilRede === "xm-h264dvr" && (
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Informe apenas o IP da camera. A URL RTSP sera montada automaticamente.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <Label>Porta</Label>
@@ -311,6 +471,32 @@ export default function CameraCadastro() {
                     onChange={(e) => setForm({ ...form, porta: Number(e.target.value) })}
                   />
                 </div>
+                {form.perfilRede === "xm-h264dvr" && (
+                  <>
+                    <div>
+                      <Label>Canal</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={form.canal}
+                        onChange={(e) => setForm({ ...form, canal: Number(e.target.value) })}
+                      />
+                    </div>
+                    <div>
+                      <Label>Stream</Label>
+                      <Select
+                        value={form.stream}
+                        onValueChange={(v) => setForm({ ...form, stream: v as CameraForm["stream"] })}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="main">Principal</SelectItem>
+                          <SelectItem value="sub">Substream</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                )}
                 <div>
                   <Label>FPS</Label>
                   <Input
@@ -376,7 +562,7 @@ export default function CameraCadastro() {
               <Camera className="h-12 w-12 text-primary/40" />
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              {form.url && !isDevice ? `Stream configurado para ${form.url}` : "O preview aparecerá após salvar e conectar a câmera."}
+              {resolvedStreamUrl && !isDevice ? `Stream configurado para ${resolvedStreamUrl}` : "O preview aparecerá após salvar e conectar a câmera."}
             </p>
           </div>
 

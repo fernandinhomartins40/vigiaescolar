@@ -16,21 +16,25 @@ function safeSegment(value: string) {
 }
 
 function withCredentials(camera: GatewayCamera) {
+  const streamUrl = camera.streamUrl
+    .replaceAll("{username}", encodeURIComponent(camera.username ?? ""))
+    .replaceAll("{password}", encodeURIComponent(camera.password ?? ""));
+
   if (!camera.username || !camera.password) {
-    return camera.streamUrl;
+    return streamUrl;
   }
 
   try {
-    const url = new URL(camera.streamUrl);
+    const url = new URL(streamUrl);
     if (url.username || url.password) {
-      return camera.streamUrl;
+      return streamUrl;
     }
 
     url.username = camera.username;
     url.password = camera.password;
     return url.toString();
   } catch {
-    return camera.streamUrl;
+    return streamUrl;
   }
 }
 

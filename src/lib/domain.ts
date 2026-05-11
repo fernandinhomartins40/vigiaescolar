@@ -112,6 +112,15 @@ export type Camera = {
   tenantId?: string;
 };
 
+export type CameraDiscoveryCandidate = {
+  ip: string;
+  ports: number[];
+  profile: "xm-h264dvr" | "rtsp" | "ip";
+  label: string;
+  confidence: number;
+  metadata?: Record<string, unknown>;
+};
+
 export type BiometricRecognitionEmbedding = {
   id: string;
   modelName: string;

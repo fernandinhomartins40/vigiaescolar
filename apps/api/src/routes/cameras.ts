@@ -1,4 +1,6 @@
 import { Router } from "express";
+import net from "node:net";
+import os from "node:os";
 import { UserRole } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
@@ -38,6 +40,124 @@ const cameraSchema = z.object({
 const deviceSourceSchema = z.object({
   escolaId: z.string().trim().min(1),
 });
+
+const CAMERA_DISCOVERY_PORTS = [554, 34567, 80, 8080, 8899, 5000, 8554] as const;
+
+type DiscoveryCandidate = {
+  ip: string;
+  ports: number[];
+  profile: "xm-h264dvr" | "rtsp" | "ip";
+  label: string;
+  confidence: number;
+  metadata?: Record<string, unknown>;
+};
+
+function privateIpv4Interfaces() {
+  const ignoredInterfaces = /vEthernet|WSL|Docker|Loopback|Bluetooth|VMware|VirtualBox|Hyper-V/i;
+  return Object.entries(os.networkInterfaces())
+    .filter(([name]) => !ignoredInterfaces.test(name))
+    .flatMap(([, items]) => items ?? [])
+    .filter((item) => item.family === "IPv4" && !item.internal && !item.address.startsWith("169.254."))
+    .filter((item) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(item.address));
+}
+
+function subnetIps(address: string) {
+  const parts = address.split(".");
+  if (parts.length !== 4) return [];
+  const prefix = parts.slice(0, 3).join(".");
+  return Array.from({ length: 254 }, (_, index) => `${prefix}.${index + 1}`).filter((ip) => ip !== address);
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, iteratee: (item: T) => Promise<R>) {
+  const results: R[] = [];
+  let cursor = 0;
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await iteratee(items[index]);
+      }
+    }),
+  );
+
+  return results;
+}
+
+async function isTcpOpen(host: string, port: number, timeoutMs = 650) {
+  return new Promise<boolean>((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const finish = (open: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(open);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function probeH264Dvr(ip: string) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 900);
+    const response = await fetch(`http://${ip}/cgi-bin/login.cgi`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ Name: "GetPreLoginInfo" }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) return null;
+    const text = await response.text();
+    const payload = JSON.parse(text) as Record<string, unknown>;
+    return payload.Ret === 100 ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+async function discoverNetworkCameras() {
+  const localInterfaces = privateIpv4Interfaces().slice(0, 3);
+  const ips = Array.from(new Set(localInterfaces.flatMap((item) => subnetIps(item.address))));
+  const portChecks = ips.flatMap((ip) => CAMERA_DISCOVERY_PORTS.map((port) => ({ ip, port })));
+  const openPortsByIp = new Map<string, number[]>();
+
+  await mapLimit(portChecks, 96, async ({ ip, port }) => {
+    if (await isTcpOpen(ip, port)) {
+      openPortsByIp.set(ip, [...(openPortsByIp.get(ip) ?? []), port].sort((a, b) => a - b));
+    }
+  });
+
+  const candidates = await mapLimit(Array.from(openPortsByIp.entries()), 12, async ([ip, ports]) => {
+    const metadata = ports.includes(80) ? await probeH264Dvr(ip) : null;
+    const isXm = ports.includes(34567) || metadata?.TCPPort === 34567;
+    const hasRtsp = ports.includes(554) || ports.includes(8554);
+
+    if (!isXm && !hasRtsp && !ports.includes(80)) {
+      return null;
+    }
+
+    const profile = isXm ? "xm-h264dvr" : hasRtsp ? "rtsp" : "ip";
+    const confidence = (isXm ? 70 : 0) + (hasRtsp ? 25 : 0) + (metadata ? 5 : 0);
+    return {
+      ip,
+      ports,
+      profile,
+      label: profile === "xm-h264dvr" ? "H264DVR / XM / iCSee" : profile === "rtsp" ? "Camera RTSP" : "Camera IP",
+      confidence,
+      ...(metadata ? { metadata } : {}),
+    } satisfies DiscoveryCandidate;
+  });
+
+  const discovered = candidates.filter(Boolean) as DiscoveryCandidate[];
+  return discovered.sort((a, b) => b.confidence - a.confidence || a.ip.localeCompare(b.ip));
+}
 
 async function ensureSchool(tenantId: string, schoolId: string) {
   const school = await prisma.school.findFirst({
@@ -88,6 +208,17 @@ router.get(
     });
 
     res.json(cameras.map(toCameraDTO));
+  }),
+);
+
+router.get(
+  "/discover",
+  asyncHandler(async (_req, res) => {
+    const cameras = await discoverNetworkCameras();
+    res.json({
+      cameras,
+      scannedAt: new Date().toISOString(),
+    });
   }),
 );
 
