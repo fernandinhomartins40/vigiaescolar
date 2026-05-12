@@ -13,6 +13,7 @@ dist-ssr
 .turbo
 coverage
 *.tsbuildinfo
+tools/android-build/
 apps/api/dist
 apps/api/uploads
 *.local
