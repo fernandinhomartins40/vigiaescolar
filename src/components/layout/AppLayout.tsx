@@ -1,20 +1,14 @@
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard,
-  School,
-  Layers3,
-  Users,
-  GraduationCap,
   Camera,
   ClipboardCheck,
-  Bell,
+  GraduationCap,
+  Menu,
+  LogOut,
   Settings,
   ShieldCheck,
-  Menu,
-  X,
-  LogOut,
-  ScanFace,
   ChevronRight,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -22,16 +16,10 @@ import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
 
 const navItems = [
-  { to: "/vigia", label: "Vigia ao Vivo", icon: ShieldCheck, highlight: true },
-  { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
-  { to: "/escolas", label: "Escolas", icon: School },
-  { to: "/turmas", label: "Turmas", icon: Layers3 },
-  { to: "/responsaveis", label: "Pais / Responsáveis", icon: Users },
-  { to: "/alunos", label: "Alunos", icon: GraduationCap },
-  { to: "/cameras", label: "Câmeras & Portões", icon: Camera },
-  { to: "/revisao-facial", label: "Revisão Facial", icon: ScanFace },
-  { to: "/presenca", label: "Turmas & Presença", icon: ClipboardCheck },
-  { to: "/notificacoes", label: "Notificações", icon: Bell },
+  { to: "/", label: "Monitoramento", icon: ShieldCheck, end: true },
+  { to: "/cadastros", label: "Cadastros", icon: GraduationCap },
+  { to: "/cameras", label: "Câmeras", icon: Camera },
+  { to: "/presenca", label: "Presença", icon: ClipboardCheck },
   { to: "/configuracoes", label: "Configurações", icon: Settings },
 ];
 
@@ -122,7 +110,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
 function pageTitle(pathname: string) {
   const item = navItems.find((i) => (i.end ? pathname === i.to : pathname.startsWith(i.to) && i.to !== "/"));
-  return item?.label ?? "Dashboard";
+  return item?.label ?? "Monitoramento";
 }
 
 export default function AppLayout() {

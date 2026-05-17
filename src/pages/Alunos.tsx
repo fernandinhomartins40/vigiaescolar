@@ -1004,7 +1004,7 @@ export default function Alunos() {
                 {form.escolaId && availableTurmas.length === 0 && (
                   <p className="mt-1 text-xs text-muted-foreground">
                     Cadastre turmas para essa escola e esse turno em{" "}
-                    <Link to="/turmas" className="text-primary hover:underline">
+                    <Link to="/cadastros?aba=turmas" className="text-primary hover:underline">
                       Turmas
                     </Link>
                     .

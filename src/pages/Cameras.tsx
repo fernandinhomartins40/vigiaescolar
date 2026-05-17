@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -7,12 +7,15 @@ import {
   CameraOff,
   CheckCircle2,
   Clock,
+  Laptop,
   Loader2,
   Maximize2,
   MessageCircle,
+  Network,
   Pencil,
   Play,
   Plus,
+  Radar,
   RefreshCw,
   ScanFace,
   Settings,
@@ -23,17 +26,22 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
-import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/common/PageHeader";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useTenantResourceKeyFactory } from "@/context/auth-context";
-import { type BiometricRecognitionReference, type Camera } from "@/lib/domain";
+import { type BiometricRecognitionReference, type Camera, type CameraDiscoveryCandidate } from "@/lib/domain";
 import { getFaceApiEngine, type FaceApiModule } from "@/lib/face-api-engine";
 import {
+  createCamera,
   deleteCamera,
+  discoverCameras,
+  ensureDeviceCameraSource,
   listBiometricEvents,
   listBiometricReferences,
   listCameraEvents,
@@ -42,9 +50,70 @@ import {
   listStudents,
   listResponsibles,
   registerCameraRecognition,
+  updateCamera,
 } from "@/lib/resources";
 import { formatWhatsAppLink } from "@/lib/whatsapp";
 import { cn } from "@/lib/utils";
+
+// ─── Camera form types (inline drawer) ───────────────────────────────────────
+
+type NetworkProfile = "manual" | "xm-h264dvr";
+
+type CameraForm = {
+  id?: string;
+  nome: string;
+  escolaId: string;
+  localizacao: string;
+  tipo: Camera["tipo"];
+  url: string;
+  porta: number;
+  perfilRede: NetworkProfile;
+  canal: number;
+  stream: "main" | "sub";
+  resolucao: Camera["resolucao"];
+  fps: number;
+  status: Camera["status"];
+  usuario: string;
+  senha: string;
+};
+
+const emptyCameraForm: CameraForm = {
+  nome: "", escolaId: "", localizacao: "", tipo: "USB", url: "", porta: 554,
+  perfilRede: "manual", canal: 1, stream: "main", resolucao: "1080p", fps: 30,
+  status: "Ativa", usuario: "", senha: "",
+};
+
+const CAMERA_TYPES_DEF = [
+  { value: "USB" as const, label: "Webcam / Dispositivo", description: "Câmera conectada a este navegador", icon: Laptop },
+  { value: "IP" as const, label: "Câmera IP", description: "Câmera de rede com endereço IP", icon: Wifi },
+  { value: "RTSP" as const, label: "RTSP / NVR", description: "Stream RTSP de DVR, NVR ou câmera profissional", icon: Network },
+];
+
+const NETWORK_PROFILES_DEF = [
+  { value: "manual" as const, label: "Manual / genérico", description: "Use uma URL RTSP ou HTTP do fabricante" },
+  { value: "xm-h264dvr" as const, label: "H264DVR / XM / iCSee", description: "Perfil para câmeras Wi-Fi com VideoPlayTool" },
+];
+
+function stripProtocol(value: string) {
+  return value.trim().replace(/^[a-z]+:\/\//i, "").split("/")[0].split("@").pop() ?? "";
+}
+
+function buildNetworkUrl(form: CameraForm) {
+  const rawUrl = form.url.trim();
+  if (form.tipo !== "RTSP" || form.perfilRede !== "xm-h264dvr") return rawUrl;
+  const host = stripProtocol(rawUrl).split(":")[0];
+  if (!host) return rawUrl;
+  const port = Number(form.porta || 554);
+  const channel = Number(form.canal || 1);
+  const stream = form.stream === "sub" ? 1 : 0;
+  return `rtsp://${host}:${port}/user={username}_password={password}_channel=${channel}_stream=${stream}.sdp?real_stream`;
+}
+
+function inferNetworkProfile(url: string): Pick<CameraForm, "perfilRede" | "canal" | "stream"> {
+  const match = url.match(/_channel=(\d+)_stream=(\d+)/i);
+  if (!match) return { perfilRede: "manual", canal: 1, stream: "main" };
+  return { perfilRede: "xm-h264dvr", canal: Number(match[1]) || 1, stream: match[2] === "1" ? "sub" : "main" };
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -467,9 +536,259 @@ function useLiveCamera(camera: Camera | undefined, references: LoadedRecognition
   return { state, faces, statusMessage, errorMessage, analyzing, lastModelName, videoRef, canvasRef, legacyCanvasRef, submissionCanvasRef, start, stop, restart };
 }
 
+// ─── Inline camera drawer ────────────────────────────────────────────────────
+
+function CameraDrawer({ open, onClose, editCamera, queryClient, keys, schools }: {
+  open: boolean;
+  onClose: () => void;
+  editCamera?: Camera | null;
+  queryClient: ReturnType<typeof useQueryClient>;
+  keys: ReturnType<typeof useTenantResourceKeyFactory>;
+  schools: { id: string; nome: string }[];
+}) {
+  const [form, setForm] = useState<CameraForm>(emptyCameraForm);
+  const [discoveredCameras, setDiscoveredCameras] = useState<CameraDiscoveryCandidate[]>([]);
+
+  useEffect(() => {
+    if (editCamera) {
+      const profile = inferNetworkProfile(editCamera.url);
+      setForm({
+        id: editCamera.id, nome: editCamera.nome, escolaId: editCamera.escolaId,
+        localizacao: editCamera.localizacao, tipo: editCamera.tipo,
+        url: profile.perfilRede === "xm-h264dvr" ? stripProtocol(editCamera.url).split(":")[0] : editCamera.url,
+        porta: Number((editCamera.url.split(":").slice(-1)[0] || "554").split("/")[0]) || 554,
+        perfilRede: profile.perfilRede, canal: profile.canal, stream: profile.stream,
+        resolucao: editCamera.resolucao, fps: editCamera.fps, status: editCamera.status,
+        usuario: editCamera.usuario ?? "", senha: editCamera.senha ?? "",
+      });
+    } else {
+      setForm(emptyCameraForm);
+    }
+    setDiscoveredCameras([]);
+  }, [editCamera, open]);
+
+  const createMutation = useMutation({
+    mutationFn: createCamera,
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: keys.cameras }); toast.success("Câmera cadastrada"); onClose(); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Falha ao cadastrar câmera"),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: async (payload: CameraForm) => {
+      if (!payload.id) throw new Error("ID inválido");
+      return updateCamera(payload.id, payload);
+    },
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: keys.cameras }); toast.success("Câmera atualizada"); onClose(); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Falha ao atualizar câmera"),
+  });
+
+  const ensureDeviceMutation = useMutation({
+    mutationFn: async (payload: CameraForm) => {
+      if (!payload.escolaId) throw new Error("Selecione a escola");
+      const deviceCamera = await ensureDeviceCameraSource(payload.escolaId);
+      return updateCamera(deviceCamera.id, { nome: payload.nome || "Câmera do dispositivo", escolaId: payload.escolaId, localizacao: "Dispositivo local", tipo: "USB", url: "device://live", resolucao: payload.resolucao, fps: 30, status: payload.status });
+    },
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: keys.cameras }); toast.success("Câmera do dispositivo cadastrada"); onClose(); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Falha ao cadastrar câmera"),
+  });
+
+  const discoverMutation = useMutation({
+    mutationFn: discoverCameras,
+    onSuccess: (cameras) => {
+      setDiscoveredCameras(cameras);
+      if (cameras.length === 0) { toast.info("Nenhuma câmera encontrada na rede local"); return; }
+      toast.success(`${cameras.length} dispositivo(s) encontrado(s)`);
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Falha ao buscar câmeras"),
+  });
+
+  const isPending = createMutation.isPending || updateMutation.isPending || ensureDeviceMutation.isPending;
+  const isDevice = form.tipo === "USB";
+  const isNetwork = form.tipo === "IP" || form.tipo === "RTSP";
+  const resolvedStreamUrl = isDevice ? "device://live" : buildNetworkUrl(form);
+
+  const setTipo = (tipo: Camera["tipo"]) => {
+    setForm({ ...emptyCameraForm, escolaId: form.escolaId, tipo, nome: tipo === "USB" ? "Câmera do dispositivo" : "", porta: tipo === "RTSP" ? 554 : tipo === "IP" ? 80 : 554, perfilRede: tipo === "RTSP" ? "xm-h264dvr" : "manual", canal: 1, stream: "main" });
+  };
+
+  const useDiscovered = (camera: CameraDiscoveryCandidate) => {
+    const rtspPort = camera.ports.includes(554) ? 554 : camera.ports.includes(8554) ? 8554 : 554;
+    const profile: NetworkProfile = camera.profile === "xm-h264dvr" ? "xm-h264dvr" : "manual";
+    setForm({ ...form, tipo: camera.profile === "ip" ? "IP" : "RTSP", perfilRede: profile, url: camera.ip, porta: rtspPort, canal: 1, stream: "main", usuario: form.usuario || (profile === "xm-h264dvr" ? "yura" : ""), localizacao: form.localizacao || "Câmera encontrada na rede" });
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!form.nome.trim() || !form.escolaId) { toast.error("Preencha o nome e a escola"); return; }
+    if (isNetwork && !resolvedStreamUrl.trim()) { toast.error("Informe a URL ou endereço IP"); return; }
+    if (form.perfilRede === "xm-h264dvr" && (!form.usuario.trim() || !form.senha.trim())) { toast.error("Informe usuário e senha para H264DVR / XM / iCSee"); return; }
+    if (form.id) { updateMutation.mutate({ ...form, url: resolvedStreamUrl, fps: Number(form.fps || 30) }); return; }
+    if (isDevice) { ensureDeviceMutation.mutate(form); return; }
+    createMutation.mutate({ ...form, url: resolvedStreamUrl, fps: Number(form.fps || 30) });
+  };
+
+  return (
+    <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
+        <SheetHeader>
+          <SheetTitle>{form.id ? "Editar Câmera" : "Nova Câmera"}</SheetTitle>
+        </SheetHeader>
+
+        <form onSubmit={handleSubmit} className="mt-4 space-y-5">
+          {/* Tipo */}
+          <div>
+            <Label className="text-xs font-medium uppercase tracking-widest text-muted-foreground mb-3 block">Tipo de câmera</Label>
+            <div className="grid grid-cols-3 gap-2">
+              {CAMERA_TYPES_DEF.map(({ value, label, description, icon: Icon }) => (
+                <button key={value} type="button" onClick={() => setTipo(value)}
+                  className={cn("flex flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition-all text-sm",
+                    form.tipo === value ? "border-primary bg-primary/10" : "border-border bg-background hover:border-primary/40")}>
+                  <Icon className={cn("h-4 w-4", form.tipo === value ? "text-primary" : "text-muted-foreground")} />
+                  <div className={cn("font-semibold text-xs", form.tipo === value ? "text-primary" : "")}>{label}</div>
+                  <div className="text-[10px] text-muted-foreground leading-tight">{description}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Campos comuns */}
+          <div className="grid grid-cols-1 gap-3">
+            <div>
+              <Label>Nome / Identificação *</Label>
+              <Input placeholder={isDevice ? "Ex: Webcam Recepção" : "Ex: Portão Principal"} value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} />
+            </div>
+            <div>
+              <Label>Escola vinculada *</Label>
+              <Select value={form.escolaId} onValueChange={(v) => setForm({ ...form, escolaId: v })}>
+                <SelectTrigger><SelectValue placeholder="Selecione a escola" /></SelectTrigger>
+                <SelectContent>{schools.map((s) => <SelectItem key={s.id} value={s.id}>{s.nome}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Resolução</Label>
+                <Select value={form.resolucao} onValueChange={(v) => setForm({ ...form, resolucao: v as Camera["resolucao"] })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>{["720p", "1080p", "4K"].map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Status</Label>
+                <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v as Camera["status"] })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>{["Ativa", "Inativa", "Manutenção"].map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+            </div>
+          </div>
+
+          {/* Rede */}
+          {isNetwork && (
+            <div className="space-y-3 rounded-lg border border-primary/20 bg-primary/5 p-4">
+              <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">Configuração de rede</p>
+              <Button type="button" variant="outline" size="sm" onClick={() => discoverMutation.mutate()} disabled={discoverMutation.isPending}>
+                {discoverMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Radar className="h-3.5 w-3.5 mr-1" />}
+                Buscar na rede
+              </Button>
+              {discoveredCameras.length > 0 && (
+                <div className="grid grid-cols-2 gap-2">
+                  {discoveredCameras.map((cam) => (
+                    <button key={cam.ip} type="button" onClick={() => useDiscovered(cam)}
+                      className="rounded border border-primary/20 bg-background p-2 text-left hover:border-primary/60 transition-colors">
+                      <div className="text-sm font-medium">{cam.ip}</div>
+                      <div className="text-[11px] text-muted-foreground">{cam.label} · {cam.ports.join(", ")}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {form.tipo === "RTSP" && (
+                <div>
+                  <Label>Perfil de conexão</Label>
+                  <Select value={form.perfilRede} onValueChange={(v) => setForm({ ...form, perfilRede: v as NetworkProfile })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>{NETWORK_PROFILES_DEF.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}</SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground mt-1">{NETWORK_PROFILES_DEF.find((p) => p.value === form.perfilRede)?.description}</p>
+                </div>
+              )}
+              <div>
+                <Label>{form.perfilRede === "xm-h264dvr" ? "IP da câmera *" : form.tipo === "RTSP" ? "URL RTSP *" : "Endereço IP / URL *"}</Label>
+                <Input placeholder={form.perfilRede === "xm-h264dvr" ? "192.168.0.106" : form.tipo === "RTSP" ? "rtsp://192.168.0.10:554/stream" : "192.168.0.10"} value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label>Porta</Label>
+                  <Input type="number" value={form.porta} onChange={(e) => setForm({ ...form, porta: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <Label>FPS</Label>
+                  <Input type="number" value={form.fps} onChange={(e) => setForm({ ...form, fps: Number(e.target.value) })} />
+                </div>
+              </div>
+              {form.perfilRede === "xm-h264dvr" && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label>Canal</Label>
+                    <Input type="number" min={1} value={form.canal} onChange={(e) => setForm({ ...form, canal: Number(e.target.value) })} />
+                  </div>
+                  <div>
+                    <Label>Stream</Label>
+                    <Select value={form.stream} onValueChange={(v) => setForm({ ...form, stream: v as "main" | "sub" })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="main">Principal</SelectItem><SelectItem value="sub">Substream</SelectItem></SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Usuário</Label>
+                    <Input placeholder="admin" value={form.usuario} onChange={(e) => setForm({ ...form, usuario: e.target.value })} />
+                  </div>
+                  <div>
+                    <Label>Senha</Label>
+                    <Input type="password" placeholder="••••••••" value={form.senha} onChange={(e) => setForm({ ...form, senha: e.target.value })} />
+                  </div>
+                </div>
+              )}
+              {form.tipo === "IP" && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label>Usuário</Label>
+                    <Input placeholder="admin" value={form.usuario} onChange={(e) => setForm({ ...form, usuario: e.target.value })} />
+                  </div>
+                  <div>
+                    <Label>Senha</Label>
+                    <Input type="password" placeholder="••••••••" value={form.senha} onChange={(e) => setForm({ ...form, senha: e.target.value })} />
+                  </div>
+                </div>
+              )}
+              <div>
+                <Label>Localização</Label>
+                <Input placeholder="Ex: Entrada principal lado norte" value={form.localizacao} onChange={(e) => setForm({ ...form, localizacao: e.target.value })} />
+              </div>
+            </div>
+          )}
+
+          {isDevice && (
+            <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-muted-foreground">
+              A webcam deste dispositivo será usada como fonte ao vivo para reconhecimento facial.
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-border">
+            <Button variant="outline" type="button" onClick={onClose}>Cancelar</Button>
+            <Button type="submit" disabled={isPending}>
+              {isPending && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
+              {form.id ? "Salvar Alterações" : isDevice ? "Cadastrar Webcam" : "Cadastrar Câmera"}
+            </Button>
+          </div>
+        </form>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 // ─── Câmera USB inline card ───────────────────────────────────────────────────
 
-function UsbCameraCard({ camera, references, queryClient, keys, camEvents, school, autoStart }: {
+function UsbCameraCard({ camera, references, queryClient, keys, camEvents, school, autoStart, onEdit }: {
   camera: Camera;
   references: LoadedRecognitionReference[];
   queryClient: ReturnType<typeof useQueryClient>;
@@ -477,6 +796,7 @@ function UsbCameraCard({ camera, references, queryClient, keys, camEvents, schoo
   camEvents: { matchStatus: string }[];
   school: { nome: string } | undefined;
   autoStart: boolean;
+  onEdit: (camera: Camera) => void;
 }) {
   const live = useLiveCamera(camera, references, queryClient, keys);
   const hasStarted = useRef(false);
@@ -551,9 +871,7 @@ function UsbCameraCard({ camera, references, queryClient, keys, camEvents, schoo
             </Button>
           )}
 
-          <Link to="/cameras/cadastro" state={{ editCamera: camera }}>
-            <Button variant="ghost" size="icon" className="h-7 w-7" title="Editar"><Pencil className="h-3.5 w-3.5" /></Button>
-          </Link>
+          <Button variant="ghost" size="icon" className="h-7 w-7" title="Editar" onClick={() => onEdit(camera)}><Pencil className="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" className="h-7 w-7" title="Remover"
             onClick={() => { if (window.confirm(`Remover ${camera.nome}?`)) deleteMutation.mutate(camera.id); }}>
             <Trash2 className="h-3.5 w-3.5 text-destructive" />
@@ -623,12 +941,13 @@ function UsbCameraCard({ camera, references, queryClient, keys, camEvents, schoo
 
 // ─── Câmera IP/RTSP card (gerida pelo gateway) ────────────────────────────────
 
-function NetworkCameraCard({ camera, school, camEvents, queryClient, keys }: {
+function NetworkCameraCard({ camera, school, camEvents, queryClient, keys, onEdit }: {
   camera: Camera;
   school: { nome: string } | undefined;
   camEvents: { matchStatus: string }[];
   queryClient: ReturnType<typeof useQueryClient>;
   keys: ReturnType<typeof useTenantResourceKeyFactory>;
+  onEdit: (camera: Camera) => void;
 }) {
   const runtime = cameraRuntimeLabel(camera.operacional?.status);
   const camMatched = camEvents.filter((e) => e.matchStatus === "MATCHED").length;
@@ -656,9 +975,7 @@ function NetworkCameraCard({ camera, school, camEvents, queryClient, keys }: {
           <StatusBadge variant={camera.status === "Ativa" ? "ok" : camera.status === "Manutenção" ? "manutencao" : "inativo"}>
             {camera.status}
           </StatusBadge>
-          <Link to="/cameras/cadastro" state={{ editCamera: camera }}>
-            <Button variant="ghost" size="icon" className="h-7 w-7" title="Editar"><Pencil className="h-3.5 w-3.5" /></Button>
-          </Link>
+          <Button variant="ghost" size="icon" className="h-7 w-7" title="Editar" onClick={() => onEdit(camera)}><Pencil className="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" className="h-7 w-7" title="Remover"
             onClick={() => { if (window.confirm(`Remover ${camera.nome}?`)) deleteMutation.mutate(camera.id); }}>
             <Trash2 className="h-3.5 w-3.5 text-destructive" />
@@ -719,6 +1036,8 @@ function MonitorTab() {
   const keys = useTenantResourceKeyFactory();
   const queryClient = useQueryClient();
   const now = useNow();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editCamera, setEditCamera] = useState<Camera | null>(null);
 
   const camerasQuery = useQuery({ queryKey: keys.cameras, queryFn: listCameras, refetchInterval: 30_000 });
   const schoolsQuery = useQuery({ queryKey: keys.schools, queryFn: listSchools });
@@ -729,6 +1048,9 @@ function MonitorTab() {
   const schools = schoolsQuery.data ?? [];
   const biometricEvents = biometricEventsQuery.data ?? [];
   const references = useMemo(() => buildRecognitionReferences(biometricReferencesQuery.data ?? []), [biometricReferencesQuery.data]);
+
+  const openNew = () => { setEditCamera(null); setDrawerOpen(true); };
+  const openEdit = (camera: Camera) => { setEditCamera(camera); setDrawerOpen(true); };
 
   const usbCameras = cameras.filter((c) => c.tipo === "USB" || c.url === "device://live");
   const networkCameras = cameras.filter((c) => c.tipo !== "USB" && c.url !== "device://live");
@@ -742,6 +1064,8 @@ function MonitorTab() {
 
   return (
     <div className="space-y-4">
+      <CameraDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} editCamera={editCamera} queryClient={queryClient} keys={keys} schools={schools} />
+
       {/* Resumo de saúde */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
@@ -798,11 +1122,9 @@ function MonitorTab() {
               <h3 className="font-semibold text-sm text-foreground">Câmeras do Dispositivo</h3>
               <span className="text-[10px] text-muted-foreground">(webcam / USB)</span>
             </div>
-            <Link to="/cameras/cadastro">
-              <Button size="sm" variant="outline" className="h-7 text-xs">
-                <Plus className="h-3 w-3 mr-1" /> Nova
-              </Button>
-            </Link>
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={openNew}>
+              <Plus className="h-3 w-3 mr-1" /> Nova
+            </Button>
           </div>
           <div className="space-y-3">
             {usbCameras.map((camera) => {
@@ -819,6 +1141,7 @@ function MonitorTab() {
                   camEvents={camEvents}
                   school={school}
                   autoStart={camera.status === "Ativa"}
+                  onEdit={openEdit}
                 />
               );
             })}
@@ -848,6 +1171,7 @@ function MonitorTab() {
                   camEvents={camEvents}
                   queryClient={queryClient}
                   keys={keys}
+                  onEdit={openEdit}
                 />
               );
             })}
@@ -864,9 +1188,7 @@ function MonitorTab() {
         <div className="glass-card p-8 flex flex-col items-center justify-center text-muted-foreground text-sm gap-3">
           <CameraIcon className="h-12 w-12 opacity-30" />
           <span>Nenhuma câmera cadastrada</span>
-          <Link to="/cameras/cadastro">
-            <Button size="sm" variant="outline">Cadastrar primeira câmera</Button>
-          </Link>
+          <Button size="sm" variant="outline" onClick={openNew}>Cadastrar primeira câmera</Button>
         </div>
       ) : null}
     </div>
@@ -1126,14 +1448,6 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
         title="Câmeras & Portões"
         subtitle="Monitoramento, saúde e gerenciamento das câmeras"
         breadcrumb={[{ label: "Início", href: "/" }, { label: "Câmeras" }]}
-        actions={
-          <Link to="/cameras/cadastro">
-            <Button variant="outline">
-              <Settings className="h-4 w-4 mr-1" />
-              Cadastrar Câmera
-            </Button>
-          </Link>
-        }
       />
 
       <div className="flex gap-1 mb-4 border-b border-border">

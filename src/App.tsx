@@ -6,19 +6,12 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import AppLayout from "@/components/layout/AppLayout";
 import { AuthProvider } from "@/context/auth-context";
 import { PublicOnlyRoute, RequireAuth } from "@/components/auth/RouteGuards";
-import Dashboard from "./pages/Dashboard";
-import Escolas from "./pages/Escolas";
-import Turmas from "./pages/Turmas";
-import Responsaveis from "./pages/Responsaveis";
-import Alunos from "./pages/Alunos";
+import Monitoramento from "./pages/Monitoramento";
+import Cadastros from "./pages/Cadastros";
 import Cameras from "./pages/Cameras";
-import CameraCadastro from "./pages/CameraCadastro";
-import Vigia from "./pages/Vigia";
-import RevisaoFacial from "./pages/RevisaoFacial";
 import Presenca from "./pages/Presenca";
-import Notificacoes from "./pages/Notificacoes";
-import PWA from "./pages/PWA";
 import Configuracoes from "./pages/Configuracoes";
+import PWA from "./pages/PWA";
 import NotFound from "./pages/NotFound.tsx";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -56,17 +49,10 @@ const App = () => (
               <Route path="responsavel" element={<PWA />} />
               <Route path="app-responsavel" element={<PWA />} />
               <Route element={<AppLayout />}>
-                <Route index element={<Dashboard />} />
-                <Route path="escolas" element={<Escolas />} />
-                <Route path="turmas" element={<Turmas />} />
-                <Route path="responsaveis" element={<Responsaveis />} />
-                <Route path="alunos" element={<Alunos />} />
-                <Route path="vigia" element={<Vigia />} />
-                <Route path="revisao-facial" element={<RevisaoFacial />} />
+                <Route index element={<Monitoramento />} />
+                <Route path="cadastros" element={<Cadastros />} />
                 <Route path="cameras" element={<Cameras />} />
-                <Route path="cameras/cadastro" element={<CameraCadastro />} />
                 <Route path="presenca" element={<Presenca />} />
-                <Route path="notificacoes" element={<Notificacoes />} />
                 <Route path="configuracoes" element={<Configuracoes />} />
               </Route>
             </Route>
