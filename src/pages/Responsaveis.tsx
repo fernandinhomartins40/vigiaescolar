@@ -177,7 +177,7 @@ export default function Responsaveis() {
               setForm(emptyForm);
               setOpen(true);
             }}
-            className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
           >
             <Plus className="h-4 w-4 mr-1" /> Novo Responsável
           </Button>

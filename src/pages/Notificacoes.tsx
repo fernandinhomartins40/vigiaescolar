@@ -87,8 +87,8 @@ export default function Notificacoes() {
       <div className="glass-card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-background/40 border-b border-primary/10">
-              <tr className="text-left font-display tracking-wider text-xs uppercase text-muted-foreground">
+            <thead className="bg-muted border-b border-border">
+              <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
                 <th className="px-4 py-3">Tipo</th>
                 <th className="px-4 py-3">Aluno</th>
                 <th className="px-4 py-3">Responsável</th>
@@ -108,7 +108,7 @@ export default function Notificacoes() {
                 }
 
                 return (
-                  <tr key={notification.id} className="border-b border-primary/5 hover:bg-primary/5">
+                  <tr key={notification.id} className="border-b border-border hover:bg-muted/50 transition-colors">
                     <td className="px-4 py-3">
                       <StatusBadge variant={notification.tipo === "Entrada" ? "presente" : notification.tipo === "Saída" ? "saiu" : "alerta"}>
                         {notification.tipo}

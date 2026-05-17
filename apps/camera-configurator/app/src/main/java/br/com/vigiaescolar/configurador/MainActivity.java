@@ -14,12 +14,18 @@ import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -51,8 +57,16 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int REQ_PERMISSIONS = 70;
-    private static final int[] CAMERA_PORTS = {554, 34567, 80, 8080, 8899, 8554};
+    private static final String XM_AP_IP = "192.168.10.1";
+    private static final String XM_AP_PASSWORD = "1234567890";
+    private static final int[] CAMERA_PORTS = {554, 34567, 34571, 80, 8080, 8899, 8554};
     private static final int[] API_PORTS = {3001, 7003, 80, 8080};
+    private static final int COLOR_BG = Color.rgb(245, 247, 251);
+    private static final int COLOR_CARD = Color.WHITE;
+    private static final int COLOR_TEXT = Color.rgb(17, 24, 39);
+    private static final int COLOR_MUTED = Color.rgb(100, 116, 139);
+    private static final int COLOR_BORDER = Color.rgb(226, 232, 240);
+    private static final int COLOR_PRIMARY = Color.rgb(37, 99, 235);
 
     private final ExecutorService pool = Executors.newFixedThreadPool(48);
     private final Set<String> bleAddresses = new HashSet<>();
@@ -60,6 +74,7 @@ public class MainActivity extends Activity {
     private final Map<String, List<Integer>> networkCandidates = new HashMap<>();
 
     private LinearLayout logList;
+    private LinearLayout setupList;
     private LinearLayout networkList;
     private LinearLayout apiList;
     private LinearLayout schoolList;
@@ -107,60 +122,112 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(COLOR_BG);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(28, 28, 28, 28);
+        root.setPadding(dp(18), dp(18), dp(18), dp(24));
         scroll.addView(root);
 
+        LinearLayout hero = card();
         TextView title = title("Vigia Config Camera");
-        root.addView(title);
-        root.addView(text("Use este app para descobrir a camera por Bluetooth ou rede local e cadastrar no Vigia Escolar."));
+        hero.addView(title);
+        hero.addView(muted("Configure cameras Wi-Fi para reconhecimento facial sem precisar descobrir IP ou URL manualmente."));
+        root.addView(hero);
 
-        root.addView(section("1. Bluetooth"));
-        bleButton = button("Buscar dispositivos BLE", v -> toggleBleScan());
-        root.addView(bleButton);
+        LinearLayout setupCard = card();
+        setupCard.addView(section("1. Modo AP iCSee"));
+        setupCard.addView(muted("Se a camera ainda nao esta no Wi-Fi da escola, coloque em modo AP. No iCSee, esse fluxo usa o ponto de acesso da camera, senha padrao 1234567890, IP 192.168.10.1 e rotinas XM nas portas 34567/34571."));
+        setupCard.addView(secondaryButton("Abrir Wi-Fi do Android", v -> openWifiSettings()));
+        setupCard.addView(primaryButton("Estou conectado ao AP da camera", v -> useCameraApMode()));
+        setupList = listBox();
+        setupCard.addView(setupList);
+        root.addView(setupCard);
+
+        LinearLayout bleCard = card();
+        bleCard.addView(section("2. Bluetooth"));
+        bleCard.addView(muted("Localize a camera em modo pareamento e colete os UUIDs BLE para diagnostico. O iCSee usa Bluetooth para localizar e iniciar configuracao, mas o envio de Wi-Fi depende do SDK XM."));
+        bleButton = secondaryButton("Buscar dispositivos BLE", v -> toggleBleScan());
+        bleCard.addView(bleButton);
         logList = listBox();
-        root.addView(logList);
+        bleCard.addView(logList);
+        root.addView(bleCard);
 
-        root.addView(section("2. Rede local"));
-        root.addView(button("Buscar cameras na rede Wi-Fi", v -> scanLan()));
+        LinearLayout networkCard = card();
+        networkCard.addView(section("3. Rede local"));
+        networkCard.addView(muted("Procure cameras conectadas ao mesmo Wi-Fi por portas RTSP/H264DVR/XM, incluindo 34567 e 34571."));
+        networkCard.addView(primaryButton("Buscar cameras na rede Wi-Fi", v -> scanLan()));
         networkList = listBox();
-        root.addView(networkList);
+        networkCard.addView(networkList);
+        root.addView(networkCard);
 
-        root.addView(section("3. Cadastro no Vigia Escolar"));
-        root.addView(text("A API sera identificada automaticamente na rede local. Use o campo abaixo apenas se precisar corrigir manualmente."));
-        root.addView(button("Encontrar API do Vigia Escolar", v -> discoverApis()));
+        LinearLayout appCard = card();
+        appCard.addView(section("4. Aplicacao"));
+        appCard.addView(muted("A API e detectada automaticamente na rede local. Entre com o mesmo usuario do Vigia Escolar."));
+        appCard.addView(secondaryButton("Encontrar API do Vigia Escolar", v -> discoverApis()));
         apiList = listBox();
-        root.addView(apiList);
+        appCard.addView(apiList);
 
-        apiUrlInput = input("API detectada. Ex: http://192.168.0.104:3001/api", false);
-        emailInput = input("E-mail do usuario Vigia Escolar", false);
-        appPasswordInput = input("Senha do usuario Vigia Escolar", true);
-        tokenInput = input("Token Bearer preenchido pelo login", true);
-        schoolInput = input("ID da escola", false);
+        apiUrlInput = input("http://192.168.0.104:3001/api", false);
+        emailInput = input("email@escola.com", false);
+        appPasswordInput = input("Senha da aplicacao", true);
+        tokenInput = input("Token preenchido automaticamente", true);
+        schoolInput = input("Escola selecionada", false);
         nameInput = input("Nome da camera", false);
-        ipInput = input("IP da camera", false);
+        ipInput = input("IP encontrado", false);
         usernameInput = input("Usuario da camera", false);
         passwordInput = input("Senha da camera", true);
         usernameInput.setText("yura");
         nameInput.setText("Camera encontrada");
 
-        root.addView(apiUrlInput);
-        root.addView(emailInput);
-        root.addView(appPasswordInput);
-        root.addView(button("Entrar na API", v -> loginApi()));
-        root.addView(tokenInput);
-        root.addView(text("Depois do login, selecione a escola encontrada ou deixe o app preencher automaticamente quando houver apenas uma."));
+        appCard.addView(field("API detectada", apiUrlInput));
+        appCard.addView(field("E-mail", emailInput));
+        appCard.addView(field("Senha", appPasswordInput));
+        appCard.addView(primaryButton("Entrar na API", v -> loginApi()));
+        appCard.addView(field("Token", tokenInput));
+        appCard.addView(muted("Depois do login, selecione a escola encontrada. Se houver apenas uma, ela sera selecionada automaticamente."));
         schoolList = listBox();
-        root.addView(schoolList);
-        root.addView(schoolInput);
-        root.addView(nameInput);
-        root.addView(ipInput);
-        root.addView(usernameInput);
-        root.addView(passwordInput);
-        root.addView(button("Cadastrar camera H264DVR / XM / iCSee", v -> registerCamera()));
+        appCard.addView(schoolList);
+        appCard.addView(field("Escola", schoolInput));
+        root.addView(appCard);
+
+        LinearLayout cameraCard = card();
+        cameraCard.addView(section("5. Camera"));
+        cameraCard.addView(muted("Confirme os dados da camera e finalize o cadastro no Vigia Escolar."));
+        cameraCard.addView(field("Nome", nameInput));
+        cameraCard.addView(field("IP da camera", ipInput));
+        cameraCard.addView(field("Usuario da camera", usernameInput));
+        cameraCard.addView(field("Senha da camera", passwordInput));
+        cameraCard.addView(primaryButton("Cadastrar camera H264DVR / XM / iCSee", v -> registerCamera()));
+        root.addView(cameraCard);
 
         setContentView(scroll);
+    }
+
+    private void openWifiSettings() {
+        startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));
+    }
+
+    private void useCameraApMode() {
+        ipInput.setText(XM_AP_IP);
+        usernameInput.setText("yura");
+        appendSetup("Conecte no Wi-Fi da camera. Senha padrao observada no iCSee: " + XM_AP_PASSWORD + ".");
+        appendSetup("IP AP preenchido: " + XM_AP_IP + ". Agora toque em cadastrar ou teste a rede local.");
+        pool.execute(() -> {
+            List<Integer> open = new ArrayList<>();
+            for (int port : CAMERA_PORTS) {
+                if (isOpen(XM_AP_IP, port, 900)) open.add(port);
+            }
+            runOnUiThread(() -> {
+                if (open.isEmpty()) {
+                    appendSetup("Nao consegui abrir portas em " + XM_AP_IP + ". Verifique se o celular esta conectado no AP da camera.");
+                } else {
+                    appendSetup("Camera AP respondeu em " + XM_AP_IP + " portas " + open + ".");
+                    addNetworkCandidate(XM_AP_IP, open);
+                }
+            });
+        });
     }
 
     private void initBluetooth() {
@@ -608,7 +675,12 @@ public class MainActivity extends Activity {
         input.setHint(hint);
         input.setSingleLine(true);
         input.setInputType(password ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD : InputType.TYPE_CLASS_TEXT);
-        input.setPadding(12, 10, 12, 10);
+        input.setTextColor(COLOR_TEXT);
+        input.setHintTextColor(Color.rgb(148, 163, 184));
+        input.setTextSize(15);
+        input.setPadding(dp(12), 0, dp(12), 0);
+        input.setBackground(rounded(COLOR_BG, COLOR_BORDER, 10));
+        input.setMinHeight(dp(48));
         return input;
     }
 
@@ -616,28 +688,56 @@ public class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
+        button.setTextColor(COLOR_TEXT);
+        button.setTextSize(14);
+        button.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START);
+        button.setPadding(dp(12), dp(8), dp(12), dp(8));
+        button.setBackground(rounded(Color.rgb(248, 250, 252), COLOR_BORDER, 10));
+        button.setLayoutParams(spacedParams());
         button.setOnClickListener(listener);
+        return button;
+    }
+
+    private Button primaryButton(String label, View.OnClickListener listener) {
+        Button button = button(label, listener);
+        button.setTextColor(Color.WHITE);
+        button.setGravity(android.view.Gravity.CENTER);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setBackground(rounded(COLOR_PRIMARY, COLOR_PRIMARY, 10));
+        return button;
+    }
+
+    private Button secondaryButton(String label, View.OnClickListener listener) {
+        Button button = button(label, listener);
+        button.setTextColor(COLOR_PRIMARY);
+        button.setGravity(android.view.Gravity.CENTER);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setBackground(rounded(Color.WHITE, Color.rgb(191, 219, 254), 10));
         return button;
     }
 
     private LinearLayout listBox() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, dp(8), 0, 0);
         return box;
     }
 
     private TextView title(String value) {
         TextView view = text(value);
-        view.setTextSize(24);
-        view.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        view.setTextSize(26);
+        view.setTextColor(COLOR_TEXT);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setPadding(0, 0, 0, dp(6));
         return view;
     }
 
     private TextView section(String value) {
         TextView view = text(value);
         view.setTextSize(18);
-        view.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        view.setPadding(0, 28, 0, 8);
+        view.setTextColor(COLOR_TEXT);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setPadding(0, 0, 0, dp(6));
         return view;
     }
 
@@ -645,8 +745,70 @@ public class MainActivity extends Activity {
         TextView view = new TextView(this);
         view.setText(value);
         view.setTextSize(14);
-        view.setPadding(0, 6, 0, 6);
+        view.setTextColor(COLOR_TEXT);
+        view.setLineSpacing(0, 1.08f);
+        view.setPadding(0, dp(4), 0, dp(4));
         return view;
+    }
+
+    private TextView muted(String value) {
+        TextView view = text(value);
+        view.setTextColor(COLOR_MUTED);
+        return view;
+    }
+
+    private LinearLayout card() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackground(rounded(COLOR_CARD, COLOR_BORDER, 14));
+        card.setLayoutParams(cardParams());
+        return card;
+    }
+
+    private LinearLayout field(String label, EditText input) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setLayoutParams(spacedParams());
+
+        TextView labelView = text(label);
+        labelView.setTextSize(12);
+        labelView.setTextColor(COLOR_MUTED);
+        labelView.setTypeface(Typeface.DEFAULT_BOLD);
+        labelView.setPadding(0, 0, 0, dp(6));
+        box.addView(labelView);
+        box.addView(input, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        return box;
+    }
+
+    private GradientDrawable rounded(int fill, int stroke, int radiusDp) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fill);
+        drawable.setCornerRadius(dp(radiusDp));
+        drawable.setStroke(dp(1), stroke);
+        return drawable;
+    }
+
+    private LinearLayout.LayoutParams cardParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, 0, 0, dp(14));
+        return params;
+    }
+
+    private LinearLayout.LayoutParams spacedParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(8), 0, 0);
+        return params;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     private void appendLog(String message) {
@@ -659,6 +821,10 @@ public class MainActivity extends Activity {
 
     private void appendApi(String message) {
         if (apiList != null) apiList.addView(text(message));
+    }
+
+    private void appendSetup(String message) {
+        if (setupList != null) setupList.addView(text(message));
     }
 
     private String trim(EditText input) {

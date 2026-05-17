@@ -1,4 +1,4 @@
-import { ShieldCheck, Users, Camera, Bell, GraduationCap } from "lucide-react";
+import { ShieldCheck, Users, Camera, Bell, GraduationCap, CheckCircle } from "lucide-react";
 import type { ReactNode } from "react";
 
 const highlights = [
@@ -10,51 +10,69 @@ const highlights = [
 
 export function AuthLayout({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {
   return (
-    <div className="min-h-screen w-full bg-background text-left">
-      <div className="mx-auto grid min-h-screen max-w-6xl grid-cols-1 lg:grid-cols-[1.05fr_0.95fr]">
-        <aside className="relative overflow-hidden border-r border-primary/10 bg-[radial-gradient(circle_at_top_left,_hsl(190_100%_50%_/_0.14),_transparent_35%),radial-gradient(circle_at_bottom_right,_hsl(160_84%_39%_/_0.12),_transparent_30%)] p-6 lg:p-10">
-          <div className="absolute inset-0 tech-grid opacity-50" />
-          <div className="relative flex h-full flex-col justify-between">
-            <div className="inline-flex w-fit items-center gap-3 rounded-full border border-primary/20 bg-card/70 px-3 py-1.5 text-xs font-display tracking-[0.25em] text-primary">
-              <ShieldCheck className="h-4 w-4" />
-              VIGIAESCOLAR
+    <div className="min-h-screen w-full bg-background">
+      <div className="mx-auto grid min-h-screen max-w-6xl grid-cols-1 lg:grid-cols-[1.1fr_0.9fr]">
+        {/* Painel esquerdo — identidade institucional */}
+        <aside className="relative overflow-hidden bg-secondary flex flex-col">
+          {/* Faixa verde no topo */}
+          <div className="h-1.5 bg-primary w-full" />
+
+          <div className="flex flex-col justify-between flex-1 p-8 lg:p-12">
+            {/* Logotipo */}
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-lg bg-primary flex items-center justify-center">
+                <ShieldCheck className="h-5 w-5 text-white" strokeWidth={2.2} />
+              </div>
+              <div>
+                <div className="font-bold text-white text-lg leading-tight">VigiaEscolar</div>
+                <div className="text-white/50 text-[10px] uppercase tracking-widest">Segurança Escolar</div>
+              </div>
             </div>
 
-            <div className="max-w-xl py-10 lg:py-16">
-              <p className="mb-3 text-xs font-display tracking-[0.35em] text-secondary">SEGURANÇA ESCOLAR EM PRODUÇÃO</p>
-              <h1 className="max-w-lg text-4xl font-bold leading-tight tracking-wide text-foreground lg:text-6xl">
+            {/* Headline */}
+            <div className="max-w-md py-10 lg:py-16">
+              <div className="inline-flex items-center gap-2 rounded-full bg-primary/20 border border-primary/30 px-3 py-1 mb-5">
+                <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                <span className="text-xs font-semibold text-primary uppercase tracking-wider">Segurança Escolar em Produção</span>
+              </div>
+              <h1 className="text-3xl font-bold leading-snug text-white lg:text-4xl">
                 {title}
               </h1>
-              <p className="mt-4 max-w-lg text-sm leading-6 text-muted-foreground lg:text-base">{subtitle}</p>
+              <p className="mt-4 text-sm leading-relaxed text-white/60 lg:text-base">{subtitle}</p>
 
               <div className="mt-8 grid gap-3 sm:grid-cols-2">
                 {highlights.map((item) => (
-                  <div key={item.label} className="glass-card p-4">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <div key={item.label} className="rounded-lg border border-white/10 bg-white/5 p-4">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-white">
                       <item.icon className="h-4 w-4 text-primary" />
                       {item.label}
                     </div>
-                    <p className="mt-2 text-xs leading-5 text-muted-foreground">{item.description}</p>
+                    <p className="mt-2 text-xs leading-5 text-white/50">{item.description}</p>
                   </div>
                 ))}
               </div>
             </div>
 
-            <div className="relative glass-card p-4">
+            {/* Rodapé */}
+            <div className="rounded-lg border border-white/10 bg-white/5 p-4">
               <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-tech border border-primary/30 glow-primary">
-                  <Users className="h-5 w-5 text-primary" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary">
+                  <Users className="h-5 w-5 text-white" />
                 </div>
                 <div>
-                  <div className="text-sm font-semibold text-foreground">Banco real, sessão real</div>
-                  <div className="text-xs text-muted-foreground">Sessão, dados e CRUD vindos diretamente da API.</div>
+                  <div className="text-sm font-semibold text-white flex items-center gap-1.5">
+                    <CheckCircle className="h-3.5 w-3.5 text-primary" />
+                    Banco real, sessão real
+                  </div>
+                  <div className="text-xs text-white/50 mt-0.5">Sessão, dados e CRUD vindos diretamente da API.</div>
                 </div>
               </div>
             </div>
           </div>
         </aside>
 
-        <main className="flex items-center justify-center p-6 lg:p-10">
+        {/* Painel direito — formulário */}
+        <main className="flex items-center justify-center p-6 lg:p-10 bg-white">
           <div className="w-full max-w-md">{children}</div>
         </main>
       </div>

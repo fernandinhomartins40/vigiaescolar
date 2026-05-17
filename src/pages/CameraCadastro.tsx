@@ -546,7 +546,7 @@ export default function CameraCadastro() {
             </Button>
             <Button
               type="submit"
-              className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
               disabled={isPending}
             >
               <Save className="h-4 w-4 mr-1" />
@@ -557,8 +557,8 @@ export default function CameraCadastro() {
 
         <div className="space-y-4">
           <div className="glass-card p-4">
-            <h4 className="font-display font-semibold tracking-wide mb-3">PREVIEW</h4>
-            <div className="aspect-video bg-background border border-primary/30 rounded-lg tech-grid scanline flex items-center justify-center">
+            <h4 className="font-semibold text-foreground mb-3">Preview</h4>
+            <div className="aspect-video bg-muted border border-border rounded-lg flex items-center justify-center">
               <Camera className="h-12 w-12 text-primary/40" />
             </div>
             <p className="text-xs text-muted-foreground mt-2">

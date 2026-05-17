@@ -74,10 +74,10 @@ export default function Register() {
       title="Crie um espaço isolado para sua operação"
       subtitle="O cadastro inicial configura uma nova conta SaaS com autenticação real, tenant próprio e persistência integral em banco."
     >
-      <div className="glass-card p-6 shadow-glow-primary">
+      <div className="glass-card p-6">
         <div className="mb-6">
-          <div className="text-xs font-display tracking-[0.35em] text-secondary">REGISTRO</div>
-          <h2 className="mt-2 text-2xl font-display font-bold">Abrir nova conta</h2>
+          <div className="text-xs font-semibold tracking-widest text-primary uppercase">Registro</div>
+          <h2 className="mt-2 text-2xl font-bold text-foreground">Abrir nova conta</h2>
           <p className="mt-1 text-sm text-muted-foreground">Comece com uma organização e um administrador real.</p>
         </div>
 
@@ -129,7 +129,7 @@ export default function Register() {
             </div>
           </div>
 
-          <Button type="submit" className="w-full bg-primary text-primary-foreground hover:bg-primary/90 glow-primary" disabled={isSubmitting}>
+          <Button type="submit" className="w-full" disabled={isSubmitting}>
             {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
             Criar conta
           </Button>

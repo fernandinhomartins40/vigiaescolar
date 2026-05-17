@@ -61,10 +61,10 @@ export default function Login() {
       title="Acesso seguro ao painel"
       subtitle="Entre com uma conta real para acessar escolas, alunos, câmeras, presença e notificações vindos do backend."
     >
-      <div className="glass-card p-6 shadow-glow-primary">
+      <div className="glass-card p-6">
         <div className="mb-6">
-          <div className="text-xs font-display tracking-[0.35em] text-secondary">LOGIN</div>
-          <h2 className="mt-2 text-2xl font-display font-bold">Entrar na plataforma</h2>
+          <div className="text-xs font-semibold tracking-widest text-primary uppercase">Login</div>
+          <h2 className="mt-2 text-2xl font-bold text-foreground">Entrar na plataforma</h2>
           <p className="mt-1 text-sm text-muted-foreground">Use sua credencial real para continuar.</p>
         </div>
 
@@ -87,7 +87,7 @@ export default function Login() {
             {errors.password && <p className="text-xs text-destructive">{errors.password.message}</p>}
           </div>
 
-          <Button type="submit" className="w-full bg-primary text-primary-foreground hover:bg-primary/90 glow-primary" disabled={isSubmitting}>
+          <Button type="submit" className="w-full" disabled={isSubmitting}>
             {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
             Entrar
           </Button>

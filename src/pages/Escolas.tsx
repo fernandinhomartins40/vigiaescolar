@@ -197,7 +197,7 @@ export default function Escolas() {
               setForm(emptyForm);
               setOpen(true);
             }}
-            className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
           >
             <Plus className="h-4 w-4 mr-1" /> Nova Escola
           </Button>
@@ -217,8 +217,8 @@ export default function Escolas() {
       <div className="glass-card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-background/40 border-b border-primary/10">
-              <tr className="text-left font-display tracking-wider text-xs uppercase text-muted-foreground">
+            <thead className="bg-muted border-b border-border">
+              <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
                 <th className="px-4 py-3">Logo</th>
                 <th className="px-4 py-3">Escola</th>
                 <th className="px-4 py-3">CNPJ</th>
@@ -239,12 +239,12 @@ export default function Escolas() {
               )}
 
               {filtered.map((school) => (
-                <tr key={school.id} className="border-b border-primary/5 hover:bg-primary/5 transition">
+                <tr key={school.id} className="border-b border-border hover:bg-muted/50 transition-colors">
                   <td className="px-4 py-3">
                     <img
                       src={school.logo}
                       alt=""
-                      className="h-10 w-10 rounded-lg border border-primary/30 bg-muted object-cover"
+                      className="h-10 w-10 rounded-lg border border-border bg-muted object-cover"
                       onError={(event) => {
                         const target = event.currentTarget;
                         target.src = `https://api.dicebear.com/7.x/shapes/svg?seed=${encodeURIComponent(school.nome)}`;

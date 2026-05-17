@@ -500,7 +500,7 @@ function UsbCameraCard({ camera, references, queryClient, keys, camEvents, schoo
   const isLoading = live.state === "loading";
 
   return (
-    <div className={cn("rounded-lg border bg-background/40 p-4 transition-colors", isActive ? "border-emerald-500/40" : "border-primary/10 hover:border-primary/30")}>
+    <div className={cn("rounded-lg border bg-background p-4 transition-colors", isActive ? "border-green-300" : "border-border hover:border-primary/40")}>
       {/* Cabeçalho */}
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3 min-w-0">
@@ -518,11 +518,11 @@ function UsbCameraCard({ camera, references, queryClient, keys, camEvents, schoo
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {isActive && (
-            <span className="text-[10px] font-display tracking-widest font-semibold text-emerald-400">AO VIVO</span>
+            <span className="text-[10px] font-semibold tracking-widest text-green-700 uppercase">Ao Vivo</span>
           )}
           {isLoading && (
-            <span className="text-[10px] font-display tracking-widest font-semibold text-amber-400 flex items-center gap-1">
-              <Loader2 className="h-3 w-3 animate-spin" /> INICIANDO
+            <span className="text-[10px] font-semibold tracking-widest text-amber-700 flex items-center gap-1 uppercase">
+              <Loader2 className="h-3 w-3 animate-spin" /> Iniciando
             </span>
           )}
           <StatusBadge variant={camera.status === "Ativa" ? "ok" : camera.status === "Manutenção" ? "manutencao" : "inativo"}>
@@ -563,7 +563,7 @@ function UsbCameraCard({ camera, references, queryClient, keys, camEvents, schoo
 
       {/* Vídeo ao vivo */}
       {(isActive || isLoading) && (
-        <div className="mt-3 relative aspect-video bg-background border border-primary/20 rounded-lg overflow-hidden tech-grid scanline">
+        <div className="mt-3 relative aspect-video bg-black rounded-lg overflow-hidden border border-border">
           <video ref={live.videoRef} autoPlay muted playsInline
             className={cn("absolute inset-0 z-10 h-full w-full object-cover scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
           <canvas ref={live.canvasRef}
@@ -604,16 +604,16 @@ function UsbCameraCard({ camera, references, queryClient, keys, camEvents, schoo
 
       {/* Métricas */}
       <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-          <div className="text-muted-foreground">DETECÇÕES HOJE</div>
-          <div className="font-semibold">{camMatched} / {camEvents.length}</div>
+        <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
+          <div className="text-muted-foreground">Detecções hoje</div>
+          <div className="font-semibold text-foreground">{camMatched} / {camEvents.length}</div>
         </div>
-        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-          <div className="text-muted-foreground">RESOLUÇÃO</div>
-          <div className="font-semibold">{camera.resolucao}</div>
+        <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
+          <div className="text-muted-foreground">Resolução</div>
+          <div className="font-semibold text-foreground">{camera.resolucao}</div>
         </div>
-        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-          <div className="text-muted-foreground">ROSTOS ATIVOS</div>
+        <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
+          <div className="text-muted-foreground">Rostos ativos</div>
           <div className="font-semibold text-primary">{live.faces.length}</div>
         </div>
       </div>
@@ -640,7 +640,7 @@ function NetworkCameraCard({ camera, school, camEvents, queryClient, keys }: {
   });
 
   return (
-    <div className="rounded-lg border border-primary/10 bg-background/40 p-4 hover:border-primary/30 transition-colors">
+    <div className="rounded-lg border border-border bg-background p-4 hover:border-primary/40 transition-colors">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3 min-w-0">
           <HealthIcon status={camera.operacional?.status} />
@@ -667,25 +667,25 @@ function NetworkCameraCard({ camera, school, camEvents, queryClient, keys }: {
       </div>
 
       <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-          <div className="text-muted-foreground">TIPO</div>
-          <div className="font-semibold">{camera.tipo}</div>
+        <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
+          <div className="text-muted-foreground">Tipo</div>
+          <div className="font-semibold text-foreground">{camera.tipo}</div>
         </div>
-        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
+        <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
           <div className="text-muted-foreground">FPS</div>
           <div className="font-semibold flex items-center gap-1">
             {camera.operacional?.fpsMedido != null ? (
-              <><span className="text-emerald-400">{camera.operacional.fpsMedido}</span><span className="text-muted-foreground">/ {camera.fps}</span></>
+              <><span className="text-green-700">{camera.operacional.fpsMedido}</span><span className="text-muted-foreground">/ {camera.fps}</span></>
             ) : camera.fps}
           </div>
         </div>
-        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-          <div className="text-muted-foreground">DETECÇÕES HOJE</div>
-          <div className="font-semibold">{camMatched} / {camEvents.length}</div>
+        <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
+          <div className="text-muted-foreground">Detecções hoje</div>
+          <div className="font-semibold text-foreground">{camMatched} / {camEvents.length}</div>
         </div>
-        <div className="rounded border border-primary/10 bg-background/60 px-2 py-1.5">
-          <div className="text-muted-foreground">GATEWAY</div>
-          <div className="font-semibold truncate">{camera.operacional?.gatewayId ?? "—"}</div>
+        <div className="rounded border border-border bg-muted/30 px-2 py-1.5">
+          <div className="text-muted-foreground">Gateway</div>
+          <div className="font-semibold truncate text-foreground">{camera.operacional?.gatewayId ?? "—"}</div>
         </div>
       </div>
 
@@ -745,14 +745,14 @@ function MonitorTab() {
       {/* Resumo de saúde */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: "ONLINE", value: onlineCount, color: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/30" },
-          { label: "OFFLINE", value: offlineCount, color: "text-muted-foreground", bg: "bg-background/40 border-border" },
-          { label: "COM ALERTA", value: degradedCount, color: "text-amber-400", bg: "bg-amber-500/10 border-amber-500/30" },
-          { label: "TOTAL CÂMERAS", value: cameras.length, color: "text-primary", bg: "bg-primary/10 border-primary/30" },
+          { label: "Online", value: onlineCount, color: "text-green-700", bg: "bg-green-50 border-green-200" },
+          { label: "Offline", value: offlineCount, color: "text-muted-foreground", bg: "bg-muted border-border" },
+          { label: "Com alerta", value: degradedCount, color: "text-amber-700", bg: "bg-amber-50 border-amber-200" },
+          { label: "Total câmeras", value: cameras.length, color: "text-primary", bg: "bg-primary/10 border-primary/30" },
         ].map(({ label, value, color, bg }) => (
           <div key={label} className={cn("rounded-lg border p-4", bg)}>
-            <div className="text-[10px] font-display tracking-widest text-muted-foreground">{label}</div>
-            <div className={cn("font-display text-3xl font-bold mt-1", color)}>{value}</div>
+            <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">{label}</div>
+            <div className={cn("text-3xl font-bold mt-1", color)}>{value}</div>
           </div>
         ))}
       </div>
@@ -761,27 +761,27 @@ function MonitorTab() {
       <div className="glass-card p-4">
         <div className="flex items-center gap-2 mb-4">
           <Activity className="h-4 w-4 text-primary" />
-          <h3 className="font-display font-semibold tracking-wide text-sm">DETECÇÕES HOJE</h3>
+          <h3 className="font-semibold text-sm text-foreground">Detecções Hoje</h3>
           <span className="text-[10px] text-muted-foreground ml-auto">{now.toLocaleDateString("pt-BR")}</span>
         </div>
         <div className="grid grid-cols-3 gap-3">
-          <div className="rounded-lg border border-primary/15 bg-background/40 p-3 text-center">
-            <div className="text-[10px] font-display tracking-widest text-muted-foreground">TOTAL</div>
-            <div className="font-display text-2xl font-bold text-primary">{totalDetections}</div>
+          <div className="rounded-lg border border-border bg-muted/30 p-3 text-center">
+            <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">Total</div>
+            <div className="text-2xl font-bold text-primary">{totalDetections}</div>
           </div>
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-center">
-            <div className="text-[10px] font-display tracking-widest text-muted-foreground">RECONHECIDOS</div>
-            <div className="font-display text-2xl font-bold text-emerald-400">{matchedDetections}</div>
+          <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-center">
+            <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">Reconhecidos</div>
+            <div className="text-2xl font-bold text-green-700">{matchedDetections}</div>
           </div>
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-center">
-            <div className="text-[10px] font-display tracking-widest text-muted-foreground">EM REVISÃO</div>
-            <div className="font-display text-2xl font-bold text-amber-400">{reviewDetections}</div>
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-center">
+            <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">Em Revisão</div>
+            <div className="text-2xl font-bold text-amber-700">{reviewDetections}</div>
           </div>
         </div>
         {totalDetections > 0 && (
           <div className="mt-3 h-2 rounded-full bg-muted overflow-hidden">
             {/* eslint-disable-next-line react/forbid-component-props */}
-            <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-secondary transition-all" style={{ width: `${Math.round((matchedDetections / totalDetections) * 100)}%` }} />
+            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.round((matchedDetections / totalDetections) * 100)}%` }} />
           </div>
         )}
         <div className="mt-2 text-xs text-muted-foreground text-right">
@@ -795,7 +795,7 @@ function MonitorTab() {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <CameraIcon className="h-4 w-4 text-primary" />
-              <h3 className="font-display font-semibold tracking-wide text-sm">CÂMERAS DO DISPOSITIVO</h3>
+              <h3 className="font-semibold text-sm text-foreground">Câmeras do Dispositivo</h3>
               <span className="text-[10px] text-muted-foreground">(webcam / USB)</span>
             </div>
             <Link to="/cameras/cadastro">
@@ -832,7 +832,7 @@ function MonitorTab() {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <Wifi className="h-4 w-4 text-primary" />
-              <h3 className="font-display font-semibold tracking-wide text-sm">CÂMERAS DE REDE</h3>
+              <h3 className="font-semibold text-sm text-foreground">Câmeras de Rede</h3>
               <span className="text-[10px] text-muted-foreground">(IP / RTSP / NVR)</span>
             </div>
           </div>
@@ -950,11 +950,11 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
             {camera?.operacional?.fpsMedido != null && <span className="text-secondary">{camera.operacional.fpsMedido} FPS REAL</span>}
             <span className="text-secondary">{camera?.fps ?? 0} FPS</span>
             <span className="text-primary">{camera?.resolucao ?? "—"}</span>
-            <span className="font-bold text-primary text-lg text-glow">{now.toLocaleTimeString("pt-BR")}</span>
+            <span className="font-bold text-foreground text-lg">{now.toLocaleTimeString("pt-BR")}</span>
           </div>
         </div>
 
-        <div className="relative aspect-video bg-background border border-primary/30 rounded-lg overflow-hidden tech-grid scanline">
+        <div className="relative aspect-video bg-black rounded-lg overflow-hidden border border-border">
           <video ref={live.videoRef} autoPlay muted playsInline className={cn("absolute inset-0 z-10 h-full w-full object-cover scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
           <canvas ref={live.canvasRef} className={cn("absolute inset-0 z-20 h-full w-full pointer-events-none scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
           <canvas ref={live.legacyCanvasRef} className="hidden" aria-hidden="true" />
@@ -999,17 +999,17 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
         </div>
 
         <div className="grid grid-cols-3 gap-3 mt-3">
-          <div className="rounded-lg border border-primary/15 bg-background/40 p-2">
-            <div className="text-[10px] font-display tracking-widest text-muted-foreground">DETECÇÕES</div>
-            <div className="font-display text-xl font-bold text-primary">{live.faces.length}</div>
+          <div className="rounded-lg border border-border bg-muted/30 p-2">
+            <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">Detecções</div>
+            <div className="text-xl font-bold text-primary">{live.faces.length}</div>
           </div>
-          <div className="rounded-lg border border-secondary/30 bg-secondary/10 p-2">
-            <div className="text-[10px] font-display tracking-widest text-muted-foreground">RECONHECIDOS</div>
-            <div className="font-display text-xl font-bold text-secondary">{matchedFacesCount}</div>
+          <div className="rounded-lg border border-green-200 bg-green-50 p-2">
+            <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">Reconhecidos</div>
+            <div className="text-xl font-bold text-green-700">{matchedFacesCount}</div>
           </div>
-          <div className="rounded-lg border border-warning/30 bg-warning/10 p-2">
-            <div className="text-[10px] font-display tracking-widest text-muted-foreground">EM REVISÃO</div>
-            <div className="font-display text-xl font-bold text-warning">{reviewFacesCount || unknownFacesCount}</div>
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-2">
+            <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">Em Revisão</div>
+            <div className="text-xl font-bold text-amber-700">{reviewFacesCount || unknownFacesCount}</div>
           </div>
         </div>
 
@@ -1046,8 +1046,8 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
       {/* Painel lateral: atividade em tempo real */}
       <div className="glass-card p-4 flex flex-col">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-display font-semibold tracking-wide">ATIVIDADE EM TEMPO REAL</h3>
-          <span className="h-2 w-2 rounded-full bg-secondary animate-pulse-soft" />
+          <h3 className="font-semibold text-foreground">Atividade em Tempo Real</h3>
+          <span className="h-2 w-2 rounded-full bg-primary animate-pulse-soft" />
         </div>
         <ul className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
           {latestEvents.map((event) => {
@@ -1057,17 +1057,17 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
             const message = `Olá ${responsible.nome}, seu(sua) filho(a) ${student.nome.split(" ")[0]} ${event.tipo === "Entrou" ? "entrou na" : "saiu da"} escola às ${event.horario}.`;
             const link = formatWhatsAppLink(responsible.whatsapp, message);
             return (
-              <li key={event.id} className="flex items-center gap-3 p-2 rounded-lg border border-primary/10 bg-background/40 hover:border-primary/30">
+              <li key={event.id} className="flex items-center gap-3 p-2 rounded-lg border border-border bg-background hover:border-primary/40 transition-colors">
                 <div className="relative">
-                  <img src={student.foto} alt={student.nome} className="h-10 w-10 rounded-full bg-muted border border-primary/30 object-cover" />
-                  <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card bg-secondary" />
+                  <img src={student.foto} alt={student.nome} className="h-10 w-10 rounded-full bg-muted border border-border object-cover" />
+                  <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card bg-primary" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-sm font-medium truncate">{student.nome}</div>
                   <div className="text-[11px] text-muted-foreground">{student.turma} • {event.horario}</div>
                 </div>
                 <StatusBadge variant={event.tipo === "Entrou" ? "presente" : "saiu"}>{event.tipo}</StatusBadge>
-                <a href={link} target="_blank" rel="noreferrer" className="p-2 rounded-md bg-secondary/15 border border-secondary/40 hover:bg-secondary/25 text-secondary" title="Notificar via WhatsApp">
+                <a href={link} target="_blank" rel="noreferrer" className="p-2 rounded-md bg-green-50 border border-green-200 hover:bg-green-100 text-green-700" title="Notificar via WhatsApp">
                   <MessageCircle className="h-4 w-4" />
                 </a>
               </li>
@@ -1076,7 +1076,7 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
           {eventsQuery.isLoading && <li className="text-sm text-muted-foreground">Carregando atividades...</li>}
         </ul>
 
-        <div className="mt-4 pt-4 border-t border-primary/10">
+        <div className="mt-4 pt-4 border-t border-border">
           <div className="flex items-center justify-between mb-2">
             <h4 className="font-display text-xs font-semibold tracking-wide">TURMAS</h4>
             <Select value={escolaExpand} onValueChange={setEscolaExpand}>
@@ -1092,13 +1092,13 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
               const present = list.filter((s) => s.presencaHoje !== "ausente").length;
               const pct = list.length > 0 ? Math.round((present / list.length) * 100) : 0;
               return (
-                <div key={turma} className="rounded border border-primary/10 bg-background/40 px-3 py-2">
+                <div key={turma} className="rounded border border-border bg-background px-3 py-2">
                   <div className="flex items-center justify-between text-xs mb-1">
                     <span className="font-semibold">{turma}</span>
                     <span className="text-primary font-bold">{pct}%</span>
                   </div>
                   <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                    <div className="h-full rounded-full bg-gradient-to-r from-primary to-secondary" style={{ width: `${pct}%` }} />
+                    <div className="h-full rounded-full bg-primary" style={{ width: `${pct}%` }} />
                   </div>
                   <div className="text-[10px] text-muted-foreground mt-0.5">{present}/{list.length} presentes</div>
                 </div>
@@ -1136,7 +1136,7 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
         }
       />
 
-      <div className="flex gap-1 mb-4 border-b border-primary/10">
+      <div className="flex gap-1 mb-4 border-b border-border">
         {([
           { value: "monitor", label: "Monitoramento & Saúde" },
           { value: "live", label: "Câmera ao Vivo (teste)" },

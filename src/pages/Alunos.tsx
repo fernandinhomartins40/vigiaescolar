@@ -782,7 +782,7 @@ export default function Alunos() {
         subtitle="Cadastro com vinculação de responsáveis e biometria facial"
         breadcrumb={[{ label: "Início", href: "/" }, { label: "Alunos" }]}
         actions={
-          <Button onClick={openCreate} className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary">
+          <Button onClick={openCreate} className="bg-primary text-primary-foreground hover:bg-primary/90">
             <Plus className="h-4 w-4 mr-1" /> Novo Aluno
           </Button>
         }
@@ -886,7 +886,7 @@ export default function Alunos() {
                   <div
                     className={cn(
                       "h-8 w-8 rounded-full border-2 flex items-center justify-center font-display font-bold text-sm",
-                      step >= currentStep ? "border-primary bg-primary/15 text-primary glow-primary" : "border-border text-muted-foreground",
+                      step >= currentStep ? "border-primary bg-primary/15 text-primary" : "border-border text-muted-foreground",
                     )}
                   >
                     {step > currentStep ? <Check className="h-4 w-4" /> : currentStep}
@@ -1078,7 +1078,7 @@ export default function Alunos() {
                       }}
                       className={cn(
                         "flex items-center gap-3 p-3 rounded-lg border transition text-left",
-                        selected ? "border-primary bg-primary/10 glow-primary" : "border-border bg-background/40 hover:border-primary/40",
+                        selected ? "border-primary bg-primary/10" : "border-border bg-background/40 hover:border-primary/40",
                       )}
                     >
                       <img src={responsible.foto} className="h-10 w-10 rounded-full bg-muted border border-primary/30 object-cover" />
@@ -1110,7 +1110,7 @@ export default function Alunos() {
 
           {step === 3 && (
             <div>
-              <div className="relative aspect-video bg-background border border-primary/30 rounded-lg overflow-hidden tech-grid scanline mb-4">
+              <div className="relative aspect-video bg-black rounded-lg overflow-hidden border border-border mb-4">
                 <video
                   ref={biometricVideoRef}
                   autoPlay
@@ -1127,7 +1127,7 @@ export default function Alunos() {
                     <div className="absolute inset-0 z-20 flex items-center justify-center">
                       <div
                         className={cn(
-                          "w-40 h-52 border-2 border-dashed rounded-[50%] glow-primary transition-colors",
+                          "w-40 h-52 border-2 border-dashed rounded-[50%] transition-colors",
                           biometricFeedbackTone === "success"
                             ? "border-emerald-300"
                             : biometricFeedbackTone === "warning"
@@ -1160,7 +1160,7 @@ export default function Alunos() {
                     </p>
                   </div>
                 )}
-                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-40 h-52 border-2 border-dashed border-primary/70 rounded-[50%] glow-primary pointer-events-none" />
+                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-40 h-52 border-2 border-dashed border-primary/70 rounded-[50%] pointer-events-none" />
                 <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-destructive/20 border border-destructive/50 px-2 py-1 rounded text-xs font-display tracking-wider">
                   <span className="h-1.5 w-1.5 rounded-full bg-destructive animate-pulse-soft" />
                   {biometricCameraState === "active"
@@ -1292,7 +1292,7 @@ export default function Alunos() {
               </Button>
             )}
             {step === 3 && (
-              <Button onClick={handleFinalize} className="bg-secondary text-secondary-foreground hover:bg-secondary/90 glow-success" type="button">
+              <Button onClick={handleFinalize} className="bg-secondary text-secondary-foreground hover:bg-secondary/90 " type="button">
                 {form.id ? "Salvar Alterações" : "Finalizar Cadastro"}
               </Button>
             )}
