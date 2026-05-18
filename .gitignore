@@ -21,6 +21,12 @@ apps/api/uploads
 # Temporary folders
 _tmp_*/
 
+# APK binaries (built artifacts and reference APKs)
+*.apk
+
+# Claude memory
+.claude/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

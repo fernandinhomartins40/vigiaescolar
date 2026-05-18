@@ -1013,7 +1013,7 @@ public class MainActivity extends Activity {
         e.setSingleLine(true);
         e.setInputType(password
             ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
-            : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+            : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
         e.setTextColor(COLOR_TEXT);
         e.setHintTextColor(Color.rgb(148, 163, 184));
         e.setTextSize(14);
