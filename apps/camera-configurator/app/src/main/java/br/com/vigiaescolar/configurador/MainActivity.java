@@ -428,7 +428,7 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void connectBleDevice(String mac, String name) {
-        if (bleConnected) disconnectBle();
+        disconnectBle(); // garante estado limpo antes de cada tentativa
         connectedMac = mac;
         logBle("Conectando em " + name + " (" + mac + ")...");
         setChip(statusBle, "Conectando...", COLOR_BLUE_MED);
@@ -438,12 +438,23 @@ public class MainActivity extends Activity {
         if (adapter == null) { logBle("Bluetooth não disponível."); return; }
 
         BluetoothDevice device = adapter.getRemoteDevice(mac);
-        bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+        // TRANSPORT_LE evita tentar BR/EDR em dispositivos dual-mode (requer API 23)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+        } else {
+            bleGatt = device.connectGatt(this, false, gattCallback);
+        }
     }
 
     @SuppressLint("MissingPermission")
     private void disconnectBle() {
-        if (bleGatt != null) { bleGatt.close(); bleGatt = null; }
+        if (bleGatt != null) {
+            try { bleGatt.disconnect(); } catch (Exception ignored) {}
+            // fecha após pequeno delay para o stack BLE processar o disconnect
+            BluetoothGatt g = bleGatt;
+            mainHandler.postDelayed(() -> { try { g.close(); } catch (Exception ignored) {} }, 300);
+            bleGatt = null;
+        }
         bleConnected = false;
         connectedDevSn = null;
     }
@@ -453,16 +464,33 @@ public class MainActivity extends Activity {
         @SuppressLint("MissingPermission")
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                // status 133 = GATT_ERROR (timeout/advertising stop), 8 = link loss
+                int s = status;
+                runOnUiThread(() -> logBle("Erro de conexão BLE (status=" + s + "). Tente novamente."));
+                try { gatt.close(); } catch (Exception ignored) {}
+                if (bleGatt == gatt) bleGatt = null;
+                bleConnected = false;
+                runOnUiThread(() -> setChip(statusBle, "Erro (status " + s + ")", Color.rgb(185, 28, 28)));
+                return;
+            }
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 runOnUiThread(() -> logBle("BLE conectado. Descobrindo serviços..."));
-                gatt.discoverServices();
+                // Delay de 600ms antes de discoverServices — necessário em muitos dispositivos Android
+                mainHandler.postDelayed(() -> {
+                    if (bleGatt == gatt) {
+                        try { gatt.discoverServices(); } catch (Exception e) {
+                            logBle("Erro ao descobrir serviços: " + e.getMessage());
+                        }
+                    }
+                }, 600);
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 bleConnected = false;
                 runOnUiThread(() -> {
                     logBle("BLE desconectado.");
                     setChip(statusBle, "Desconectado", COLOR_MUTED);
                 });
-                gatt.close();
+                try { gatt.close(); } catch (Exception ignored) {}
                 if (bleGatt == gatt) bleGatt = null;
             }
         }
@@ -477,53 +505,64 @@ public class MainActivity extends Activity {
 
             BluetoothGattService svc = gatt.getService(UUID_SERVICE);
             if (svc == null) {
-                runOnUiThread(() -> logBle("Serviço XM (0x1910) não encontrado neste dispositivo."));
+                // Lista todos os services encontrados para diagnóstico
+                StringBuilder sb = new StringBuilder("Services encontrados:");
+                for (BluetoothGattService s : gatt.getServices()) sb.append("\n  ").append(s.getUuid());
+                runOnUiThread(() -> logBle("Serviço XM (0x1910) não encontrado.\n" + sb));
                 return;
             }
 
             runOnUiThread(() -> logBle("Serviço XM encontrado. Habilitando notificações..."));
             bleConnected = true;
 
-            // Habilita notificações no characteristic 0x2b11
             BluetoothGattCharacteristic notifyChar = svc.getCharacteristic(UUID_NOTIFY);
             if (notifyChar == null) {
-                runOnUiThread(() -> logBle("Characteristic de notificação não encontrada."));
+                runOnUiThread(() -> logBle("Characteristic de notificação (0x2b11) não encontrada."));
                 return;
             }
             gatt.setCharacteristicNotification(notifyChar, true);
             BluetoothGattDescriptor desc = notifyChar.getDescriptor(UUID_CCCD);
             if (desc != null) {
-                desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                gatt.writeDescriptor(desc);
+                // API 33+ usa writeDescriptor(desc, value); versões anteriores usam setValue + writeDescriptor
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                } else {
+                    desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                    gatt.writeDescriptor(desc);
+                }
             } else {
-                // CCCD não encontrado, tenta mesmo assim
-                sendAuthFrame(gatt);
+                // CCCD não encontrado — tenta enviar auth mesmo assim
+                runOnUiThread(() -> logBle("CCCD não encontrado, enviando auth diretamente..."));
+                mainHandler.postDelayed(() -> sendAuthFrame(gatt), 200);
             }
         }
 
         @SuppressLint("MissingPermission")
         @Override
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
-            runOnUiThread(() -> logBle("Notificações habilitadas. Enviando autenticação..."));
-            sendAuthFrame(gatt);
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                runOnUiThread(() -> logBle("Aviso: CCCD write status=" + status + ", continuando mesmo assim..."));
+            } else {
+                runOnUiThread(() -> logBle("Notificações habilitadas."));
+            }
+            mainHandler.postDelayed(() -> sendAuthFrame(gatt), 200);
         }
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
             if (!UUID_NOTIFY.equals(characteristic.getUuid())) return;
+            // getValue() deprecated em API 33+; usa o overload com value param se disponível
             byte[] data = characteristic.getValue();
             if (data == null || data.length < 5) return;
+            processIncoming(gatt, data);
+        }
 
-            byte funId = data[1];
-            runOnUiThread(() -> {
-                if (funId == FUN_AUTH_RSP) {
-                    handleAuthResponse(gatt, data);
-                } else if (funId == FUN_WIFI_RSP) {
-                    handleWifiResponse(data);
-                } else if (funId == FUN_DEV_INFO) {
-                    handleDevInfo(data);
-                }
-            });
+        // API 33+: overload com value diretamente
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, byte[] value) {
+            if (!UUID_NOTIFY.equals(characteristic.getUuid())) return;
+            if (value == null || value.length < 5) return;
+            processIncoming(gatt, value);
         }
 
         @Override
@@ -533,6 +572,20 @@ public class MainActivity extends Activity {
             }
         }
     };
+
+    private void processIncoming(BluetoothGatt gatt, byte[] data) {
+        byte funId = data[1];
+        runOnUiThread(() -> {
+            logBle("← BLE recv funId=0x" + String.format("%02X", funId) + " len=" + data.length);
+            if (funId == FUN_AUTH_RSP) {
+                handleAuthResponse(gatt, data);
+            } else if (funId == FUN_WIFI_RSP) {
+                handleWifiResponse(data);
+            } else if (funId == FUN_DEV_INFO) {
+                handleDevInfo(data);
+            }
+        });
+    }
 
     // ─── Protocolo BLE XM ─────────────────────────────────────────────────────
 
@@ -671,25 +724,33 @@ public class MainActivity extends Activity {
         BluetoothGattCharacteristic ch = svc.getCharacteristic(UUID_WRITE);
         if (ch == null) { logBle("Characteristic de escrita não encontrada."); return; }
 
-        // MTU BLE é 20 bytes por padrão; fragmenta se necessário
-        if (data.length <= 20) {
-            ch.setValue(data);
-            ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            gatt.writeCharacteristic(ch);
+        // API 33+ usa writeCharacteristic(ch, value, writeType)
+        // Versões anteriores usam setValue + writeCharacteristic(ch)
+        if (data.length <= 512) {
+            writeChunk(gatt, ch, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
         } else {
-            // Envia em chunks de 20 bytes com pequeno delay entre eles
+            // Fragmenta em chunks de 512 bytes (MTU máximo negociado)
             pool.execute(() -> {
                 int offset = 0;
                 while (offset < data.length) {
-                    int end = Math.min(offset + 20, data.length);
+                    int end = Math.min(offset + 512, data.length);
                     byte[] chunk = Arrays.copyOfRange(data, offset, end);
-                    ch.setValue(chunk);
-                    ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
-                    gatt.writeCharacteristic(ch);
+                    writeChunk(gatt, ch, chunk, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
                     offset = end;
                     try { Thread.sleep(50); } catch (InterruptedException ignored) {}
                 }
             });
+        }
+    }
+
+    @SuppressLint({"MissingPermission", "NewApi"})
+    private void writeChunk(BluetoothGatt gatt, BluetoothGattCharacteristic ch, byte[] data, int writeType) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(ch, data, writeType);
+        } else {
+            ch.setValue(data);
+            ch.setWriteType(writeType);
+            gatt.writeCharacteristic(ch);
         }
     }
 
