@@ -254,7 +254,7 @@ public class MainActivity extends Activity {
 
         // ── PASSO 2: Wi-Fi da escola ─────────────────────────────────────────
         LinearLayout wifiCard = card();
-        wifiCard.addView(stepHeader("2", "Rede Wi-Fi da escola"));
+        wifiCard.addView(stepRow("2", "Rede Wi-Fi da escola"));
         wifiCard.addView(muted("Rede Wi-Fi que a câmera vai usar após ser configurada. Use a rede da escola (não a do celular)."));
         wifiSsidInput = input("Nome da rede (SSID)");
         wifiPassInput = inputPass("Senha da rede Wi-Fi");
@@ -264,7 +264,7 @@ public class MainActivity extends Activity {
 
         // ── PASSO 3: Configurar via BLE ──────────────────────────────────────
         LinearLayout configCard = card();
-        configCard.addView(stepHeader("3", "Configurar câmera via Bluetooth"));
+        configCard.addView(stepRow("3", "Configurar câmera via Bluetooth"));
         configCard.addView(muted("Selecione a câmera encontrada no Passo 1 e toque em configurar. O app enviará o Wi-Fi da escola diretamente para a câmera via BLE."));
         cameraPassInput = inputPass("Senha da câmera (padrão: vazio)");
         logBle = vStack();
@@ -293,7 +293,7 @@ public class MainActivity extends Activity {
 
         // ── PASSO 4: API VigiaEscolar ─────────────────────────────────────────
         LinearLayout apiCard = card();
-        apiCard.addView(stepHeader("4", "Login VigiaEscolar"));
+        apiCard.addView(stepRow("4", "Login VigiaEscolar"));
         apiCard.addView(muted("Entre com o mesmo e-mail e senha do painel web. A API é detectada automaticamente na rede local."));
         apiUrlInput      = input("http://192.168.x.x:3001/api");
         emailInput       = input("email@escola.com");
@@ -318,7 +318,7 @@ public class MainActivity extends Activity {
 
         // ── PASSO 5: Cadastrar ────────────────────────────────────────────────
         LinearLayout regCard = card();
-        regCard.addView(stepHeader("5", "Cadastrar câmera"));
+        regCard.addView(stepRow("5", "Cadastrar câmera"));
         regCard.addView(muted("Após a câmera conectar ao Wi-Fi da escola (LED fixo), informe o novo IP na rede local e finalize o cadastro."));
         cameraNameInput = input("Nome da câmera (ex: Entrada Principal)");
         cameraLocInput  = input("Localização (ex: Portão norte)");
@@ -1123,33 +1123,6 @@ public class MainActivity extends Activity {
         c.setBackground(rounded(COLOR_CARD, COLOR_BORDER, 14));
         c.setLayoutParams(matchWrap(0, 0, 0, dp(14)));
         return c;
-    }
-
-    private TextView stepHeader(String num, String label) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-
-        TextView badge = new TextView(this);
-        badge.setText(num);
-        badge.setTextSize(11);
-        badge.setTextColor(Color.WHITE);
-        badge.setTypeface(Typeface.DEFAULT_BOLD);
-        badge.setGravity(Gravity.CENTER);
-        badge.setBackground(rounded(COLOR_GREEN, COLOR_GREEN, 12));
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(24), dp(24));
-        badge.setLayoutParams(bp);
-
-        TextView lbl = tv(label, 16, COLOR_BLUE, true);
-        lbl.setPadding(dp(10), 0, 0, 0);
-        row.addView(badge);
-        row.addView(lbl);
-
-        LinearLayout.LayoutParams rp = matchWrap(0, 0, 0, dp(8));
-        row.setLayoutParams(rp);
-        return (TextView) row.getChildAt(1); // devolver o label para referência não usada
-        // Hack: retornamos um TextView mas na prática adicionamos o row via campo extra
-        // Correção: usar método que retorna View
     }
 
     private View stepRow(String num, String label) {
