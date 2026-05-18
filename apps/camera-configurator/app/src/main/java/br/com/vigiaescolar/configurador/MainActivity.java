@@ -339,16 +339,27 @@ public class MainActivity extends Activity {
     private void initBle() {
         BluetoothManager mgr = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         BluetoothAdapter adapter = mgr != null ? mgr.getAdapter() : null;
-        bleScanner = adapter != null ? adapter.getBluetoothLeScanner() : null;
+        if (adapter == null || !adapter.isEnabled()) {
+            logBle("Bluetooth desativado. Ative o Bluetooth e abra o app novamente.");
+            if (bleScanButton != null) bleScanButton.setEnabled(false);
+            return;
+        }
+        bleScanner = adapter.getBluetoothLeScanner();
         if (bleScanner == null) {
             logBle("Bluetooth LE não disponível neste dispositivo.");
             if (bleScanButton != null) bleScanButton.setEnabled(false);
+        } else {
+            logBle("Bluetooth LE pronto. Toque em 'Buscar câmeras BLE'.");
         }
     }
 
     @SuppressLint("MissingPermission")
     private void toggleBleScan() {
-        if (bleScanner == null) { toast("Bluetooth LE não disponível"); return; }
+        // Reinicia o scanner caso o adapter tenha sido recriado (ex: BT desligou/ligou)
+        if (bleScanner == null) {
+            initBle();
+            if (bleScanner == null) { toast("Bluetooth LE não disponível"); return; }
+        }
         if (bleScanning) {
             stopBleScan();
         } else {
@@ -363,19 +374,24 @@ public class MainActivity extends Activity {
         bleDeviceList.removeAllViews();
         bleScanning = true;
         bleScanButton.setText("Parar busca BLE");
-        setChip(statusBle, "Escaneando...", COLOR_BLUE_MED);
-        logBle("Buscando câmeras XM/iCSee via Bluetooth...");
+        setChip(statusBle, "Escaneando... (60s)", COLOR_BLUE_MED);
+        logBle("Buscando câmeras XM/iCSee... Coloque a câmera em modo de emparelhamento (LED piscando).");
         bleScanner.startScan(bleScanCallback);
-        // Parar automaticamente em 20 segundos
-        mainHandler.postDelayed(this::stopBleScan, 20_000);
+        mainHandler.postDelayed(this::stopBleScan, 60_000);
     }
 
     @SuppressLint("MissingPermission")
     private void stopBleScan() {
-        if (bleScanner != null && bleScanning) bleScanner.stopScan(bleScanCallback);
+        mainHandler.removeCallbacks(this::stopBleScan);
+        if (bleScanner != null && bleScanning) {
+            try { bleScanner.stopScan(bleScanCallback); } catch (Exception ignored) {}
+        }
         bleScanning = false;
         if (bleScanButton != null) bleScanButton.setText("Buscar câmeras BLE");
-        if (statusBle != null && !bleConnected) setChip(statusBle, "Scan encerrado", COLOR_MUTED);
+        if (statusBle != null && !bleConnected) {
+            int count = bleDeviceList != null ? bleDeviceList.getChildCount() : 0;
+            setChip(statusBle, count > 0 ? "Scan encerrado — " + count + " câmera(s) encontrada(s)" : "Nenhuma câmera encontrada", COLOR_MUTED);
+        }
     }
 
     private final ScanCallback bleScanCallback = new ScanCallback() {
@@ -384,12 +400,18 @@ public class MainActivity extends Activity {
         public void onScanResult(int callbackType, ScanResult result) {
             BluetoothDevice device = result.getDevice();
             String mac = device.getAddress();
-            if (!foundDevices.add(mac)) return;
 
             String name = device.getName();
-            if (name == null || name.isEmpty()) name = "Câmera XM";
+            if (name == null || name.isEmpty()) {
+                // Tenta pegar do ScanRecord
+                if (result.getScanRecord() != null && result.getScanRecord().getDeviceName() != null) {
+                    name = result.getScanRecord().getDeviceName();
+                } else {
+                    name = null;
+                }
+            }
 
-            // Verifica se anuncia o service XM 0x1910 ou tem nome sugestivo
+            // Verifica se anuncia o service XM 0x1910
             boolean isXm = false;
             if (result.getScanRecord() != null) {
                 List<android.os.ParcelUuid> uuids = result.getScanRecord().getServiceUuids();
@@ -399,12 +421,18 @@ public class MainActivity extends Activity {
                     }
                 }
             }
-            String upperName = name.toUpperCase(Locale.US);
-            if (!isXm && !upperName.contains("IPC") && !upperName.contains("XM")
-                    && !upperName.contains("CAMERA") && !upperName.contains("ICSEE")
-                    && !upperName.contains("CAM")) return;
 
-            String finalName = name;
+            // Filtra: aceita se tem service XM, ou nome sugestivo, ou RSSI alto próximo (possível câmera sem nome)
+            String upperName = name != null ? name.toUpperCase(Locale.US) : "";
+            boolean nameMatch = upperName.contains("IPC") || upperName.contains("XM")
+                    || upperName.contains("CAMERA") || upperName.contains("ICSEE")
+                    || upperName.contains("CAM") || upperName.contains("VIGIA");
+            boolean rssiClose = result.getRssi() >= -65; // muito próximo = provavelmente a câmera
+            if (!isXm && !nameMatch && !rssiClose) return;
+
+            if (!foundDevices.add(mac)) return; // já listado
+
+            String finalName = name != null ? name : ("Dispositivo BLE " + mac.substring(mac.length() - 5));
             int rssi = result.getRssi();
             boolean finalIsXm = isXm;
             runOnUiThread(() -> addBleDevice(finalName, mac, rssi, finalIsXm));
@@ -412,38 +440,79 @@ public class MainActivity extends Activity {
 
         @Override
         public void onScanFailed(int errorCode) {
-            runOnUiThread(() -> logBle("Falha no scan BLE: código " + errorCode));
+            // Código 1 = já escaneando; 2 = app já usa scan; 3 = sem recurso; 4 = BT off
+            String msg;
+            switch (errorCode) {
+                case 1:  msg = "Scan já em execução (reinicie o BT se travar)"; break;
+                case 2:  msg = "Muitos apps escaneando ao mesmo tempo"; break;
+                case 3:  msg = "Sem recurso de hardware para scan"; break;
+                case 4:  msg = "Bluetooth desligado — ative e tente novamente"; break;
+                default: msg = "Erro no scan BLE (código " + errorCode + ")";
+            }
+            runOnUiThread(() -> {
+                logBle("✗ " + msg);
+                setChip(statusBle, "Erro no scan", Color.rgb(185, 28, 28));
+                bleScanning = false;
+                if (bleScanButton != null) bleScanButton.setText("Buscar câmeras BLE");
+            });
         }
     };
 
     @SuppressLint("MissingPermission")
     private void addBleDevice(String name, String mac, int rssi, boolean confirmed) {
-        String label = (confirmed ? "✓ " : "") + name + "\n" + mac + "   RSSI " + rssi + " dBm";
-        Button btn = listBtn(label, v -> connectBleDevice(mac, name));
+        String tag = confirmed ? "[XM ✓] " : "[BLE] ";
+        String label = tag + name + "\n" + mac + "   " + rssi + " dBm\nToque para conectar";
+        Button btn = listBtn(label, v -> {
+            // Para o scan antes de conectar — o stack BLE não gosta de scan + connect simultâneos
+            stopBleScan();
+            connectBleDevice(mac, name);
+        });
         bleDeviceList.addView(btn);
-        logBle("Encontrado: " + name + " (" + mac + ")");
+        logBle("Encontrado: " + name + " (" + mac + ") " + rssi + " dBm" + (confirmed ? " [XM]" : ""));
     }
 
     // ─── PASSO 3: Conexão BLE e configuração WiFi ─────────────────────────────
 
     @SuppressLint("MissingPermission")
     private void connectBleDevice(String mac, String name) {
-        disconnectBle(); // garante estado limpo antes de cada tentativa
+        // Fecha qualquer conexão anterior completamente antes de tentar nova
+        if (bleGatt != null) {
+            try { bleGatt.disconnect(); } catch (Exception ignored) {}
+            try { bleGatt.close(); } catch (Exception ignored) {}
+            bleGatt = null;
+        }
+        bleConnected = false;
+        connectedDevSn = null;
         connectedMac = mac;
+
         logBle("Conectando em " + name + " (" + mac + ")...");
+        logBle("(Se travar em 'Conectando', desligue/ligue o BT do celular e tente novamente)");
         setChip(statusBle, "Conectando...", COLOR_BLUE_MED);
 
         BluetoothManager mgr = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         BluetoothAdapter adapter = mgr != null ? mgr.getAdapter() : null;
-        if (adapter == null) { logBle("Bluetooth não disponível."); return; }
+        if (adapter == null || !adapter.isEnabled()) {
+            logBle("✗ Bluetooth desligado.");
+            return;
+        }
 
         BluetoothDevice device = adapter.getRemoteDevice(mac);
-        // TRANSPORT_LE evita tentar BR/EDR em dispositivos dual-mode (requer API 23)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
         } else {
             bleGatt = device.connectGatt(this, false, gattCallback);
         }
+
+        // Timeout de 15s — se não conectar, avisa e fecha
+        mainHandler.postDelayed(() -> {
+            if (!bleConnected && bleGatt != null) {
+                logBle("✗ Timeout de conexão (15s). A câmera pode ter saído do modo de emparelhamento.");
+                logBle("   → Desligue e religue a câmera ou pressione o botão de reset para voltar ao modo BLE.");
+                setChip(statusBle, "Timeout — reinicie a câmera", Color.rgb(185, 28, 28));
+                try { bleGatt.disconnect(); bleGatt.close(); } catch (Exception ignored) {}
+                bleGatt = null;
+            }
+        }, 15_000);
     }
 
     @SuppressLint("MissingPermission")
