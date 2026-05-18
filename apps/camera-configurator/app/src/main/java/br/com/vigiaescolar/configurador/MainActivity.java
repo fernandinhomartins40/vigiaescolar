@@ -3,6 +3,18 @@ package br.com.vigiaescolar.configurador;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothGatt;
+import android.bluetooth.BluetoothGattCallback;
+import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
+import android.bluetooth.BluetoothGattService;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
+import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -12,8 +24,11 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -39,11 +54,14 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,88 +69,107 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * VigiaEscolar — Configurador de Câmera XM/iCSee
  *
- * Fluxo principal:
- *  1. Usuário conecta o celular no AP da câmera (rede IPCamera_XXXXXX, senha 1234567890)
- *  2. App faz login DVRIP na câmera (TCP 34567, protocolo XM binário)
- *  3. App lê o SerialNo e config atual da câmera
- *  4. App envia o SSID e senha da rede Wi-Fi da escola para a câmera
- *  5. App faz login na API do VigiaEscolar
- *  6. App cadastra a câmera com o perfil correto e escola selecionada
+ * Protocolo BLE XM (engenharia reversa do APK iCSee v7.1.1):
  *
- * Protocolo DVRIP (porta 34567):
- *  - Frame: 20 bytes header binário + body JSON
- *  - Header: HeadFlag(FF) + Ver(01) + Res(0000) + SessionID(4) + SeqNo(4) + Chn(1) + Res(3) + MsgID(2 LE) + BodyLen(4 LE)
- *  - Login: MsgID=1000, senha = MD5(uppercase) truncada em 8 chars
- *  - GetConfig: MsgID=1020, body={"Name":"NetWork.Wifi","SessionID":"0x..."}
- *  - SetConfig: MsgID=1040, body={"Name":"NetWork.Wifi","SessionID":"0x...","NetWork.Wifi":{...}}
+ *  Service UUID:    00001910-0000-1000-8000-00805f9b34fb
+ *  Write Char:      00002b10-0000-1000-8000-00805f9b34fb  (app → câmera)
+ *  Notify Char:     00002b11-0000-1000-8000-00805f9b34fb  (câmera → app)
+ *  CCCD Descriptor: 00002902-0000-1000-8000-00805f9b34fb
+ *
+ *  Frame BLE: [HEAD:1B 0xAB] [FUN_ID:1B] [LEN:2B LE] [CHECKSUM:1B] [DATA:N bytes]
+ *  FUN_ID:  0x01=AUTH_REQ, 0x02=AUTH_RSP, 0x03=WIFI_CFG, 0x04=WIFI_RSP, 0x05=DEV_INFO
+ *
+ *  Auth token: MD5(devSN + password + randomHex4)[0..15] uppercase
+ *
+ *  Fluxo:
+ *   1. BLE scan → filtra service 0x1910 → exibe câmeras encontradas
+ *   2. Conectar → discover services → enable notify 0x2b11
+ *   3. Escrever AUTH frame em 0x2b10 com token MD5
+ *   4. Aguardar AUTH_RSP em 0x2b11
+ *   5. Escrever WIFI_CFG frame com JSON {SSID, Keys, NetType, EncrypType, Auth}
+ *   6. Aguardar WIFI_RSP → sucesso → fechar GATT
+ *   7. Após câmera conectar ao Wi-Fi da escola, cadastrar na API VigiaEscolar
+ *
+ *  Fallback AP (se BLE não disponível ou câmera não responder):
+ *   - Conectar no hotspot da câmera (192.168.10.1)
+ *   - Login DVRIP TCP 34567 + SetConfig NetWork.Wifi
  */
 public class MainActivity extends Activity {
 
-    // ─── Constantes de protocolo ───────────────────────────────────────────────
+    // ─── UUIDs BLE XM ─────────────────────────────────────────────────────────
+    private static final UUID UUID_SERVICE  = UUID.fromString("00001910-0000-1000-8000-00805f9b34fb");
+    private static final UUID UUID_WRITE    = UUID.fromString("00002b10-0000-1000-8000-00805f9b34fb");
+    private static final UUID UUID_NOTIFY   = UUID.fromString("00002b11-0000-1000-8000-00805f9b34fb");
+    private static final UUID UUID_CCCD     = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
-    private static final String XM_AP_IP       = "192.168.10.1";
-    private static final String XM_AP_PASSWORD = "1234567890";
-    private static final int    DVRIP_PORT     = 34567;
-    private static final byte   DVRIP_MAGIC    = (byte) 0xFF;
-    private static final int    MSG_LOGIN      = 1000;
-    private static final int    MSG_LOGIN_RSP  = 1001;
-    private static final int    MSG_GET_CFG    = 1020;
-    private static final int    MSG_GET_CFG_RSP= 1021;
-    private static final int    MSG_SET_CFG    = 1040;
-    private static final int    MSG_SET_CFG_RSP= 1041;
-    private static final int    MSG_LOGOUT     = 1002;
-    private static final int    DVRIP_RET_OK   = 100;
-    private static final int    CONNECT_TIMEOUT= 3000;
-    private static final int    READ_TIMEOUT   = 6000;
-    private static final int[]  API_PORTS      = {3001, 7003, 80, 8080};
-    private static final int[]  SCAN_PORTS     = {34567, 554, 34571, 8554, 80};
+    // ─── FunID BLE ────────────────────────────────────────────────────────────
+    private static final byte FUN_AUTH_REQ  = 0x01;
+    private static final byte FUN_AUTH_RSP  = 0x02;
+    private static final byte FUN_WIFI_CFG  = 0x03;
+    private static final byte FUN_WIFI_RSP  = 0x04;
+    private static final byte FUN_DEV_INFO  = 0x05;
+    private static final byte BLE_HEAD      = (byte) 0xAB;
 
-    // ─── Cores (paleta VigiaEscolar institucional) ─────────────────────────────
+    // ─── Protocolo DVRIP (fallback AP) ────────────────────────────────────────
+    private static final String XM_AP_IP    = "192.168.10.1";
+    private static final int    DVRIP_PORT  = 34567;
+    private static final byte   DVRIP_MAGIC = (byte) 0xFF;
+    private static final int    MSG_LOGIN   = 1000;
+    private static final int    MSG_SET_CFG = 1040;
+    private static final int    DVRIP_OK    = 100;
 
-    private static final int COLOR_BG      = Color.rgb(245, 247, 251);
-    private static final int COLOR_CARD    = Color.WHITE;
-    private static final int COLOR_TEXT    = Color.rgb(17, 24, 39);
-    private static final int COLOR_MUTED   = Color.rgb(100, 116, 139);
-    private static final int COLOR_BORDER  = Color.rgb(226, 232, 240);
-    private static final int COLOR_GREEN   = Color.rgb(0, 138, 59);   // #008a3b
-    private static final int COLOR_BLUE    = Color.rgb(18, 53, 90);   // #12355a
-    private static final int COLOR_SUCCESS = Color.rgb(220, 252, 231);
-    private static final int COLOR_ERROR   = Color.rgb(254, 226, 226);
+    // ─── API VigiaEscolar ─────────────────────────────────────────────────────
+    private static final int[]  API_PORTS   = {3001, 7003, 80, 8080};
+    private static final int[]  SCAN_PORTS  = {34567, 554, 34571, 8554};
 
-    // ─── Estado interno ────────────────────────────────────────────────────────
+    // ─── Cores institucionais VigiaEscolar ────────────────────────────────────
+    private static final int COLOR_BG       = Color.rgb(245, 247, 251);
+    private static final int COLOR_CARD     = Color.WHITE;
+    private static final int COLOR_TEXT     = Color.rgb(17, 24, 39);
+    private static final int COLOR_MUTED    = Color.rgb(100, 116, 139);
+    private static final int COLOR_BORDER   = Color.rgb(226, 232, 240);
+    private static final int COLOR_GREEN    = Color.rgb(0, 138, 59);    // #008a3b
+    private static final int COLOR_BLUE     = Color.rgb(18, 53, 90);    // #12355a
+    private static final int COLOR_BLUE_MED = Color.rgb(0, 103, 176);   // #0067b0
+    private static final int COLOR_SUCCESS  = Color.rgb(220, 252, 231);
+    private static final int COLOR_ERROR    = Color.rgb(254, 226, 226);
+    private static final int COLOR_WARN_BG  = Color.rgb(255, 251, 235);
+    private static final int COLOR_WARN_BDR = Color.rgb(253, 230, 138);
 
-    private final ExecutorService pool = Executors.newFixedThreadPool(32);
-    private final AtomicInteger seqNo = new AtomicInteger(0);
+    // ─── Estado BLE ───────────────────────────────────────────────────────────
+    private BluetoothLeScanner bleScanner;
+    private BluetoothGatt      bleGatt;
+    private boolean            bleScanning  = false;
+    private boolean            bleConnected = false;
+    private String             connectedDevSn   = null;
+    private String             connectedMac     = null;
+    private final Set<String>  foundDevices = new HashSet<>();
 
-    // Sessão DVRIP da câmera
-    private volatile String dvripSessionId = null;
-    private volatile String cameraSerialNo = null;
-    private volatile String cameraIp       = null;
+    // Aguardando resposta BLE (AUTH ou WIFI_CFG)
+    private volatile boolean waitingBleResponse = false;
+    private final Handler    mainHandler   = new Handler(Looper.getMainLooper());
 
-    // Sessão API VigiaEscolar
-    private volatile String apiToken       = null;
-    private volatile String selectedSchool = null;
+    // ─── Estado API ───────────────────────────────────────────────────────────
+    private volatile String  apiToken      = null;
+    private volatile String  selectedSchoolId = null;
 
-    // Candidatos descobertos
-    private final Map<String, List<Integer>> networkCandidates = new HashMap<>();
+    // ─── Pool de threads ──────────────────────────────────────────────────────
+    private final ExecutorService pool  = Executors.newFixedThreadPool(24);
+    private final AtomicInteger   seqNo = new AtomicInteger(0);
 
-    // ─── Widgets principais ────────────────────────────────────────────────────
-
-    private LinearLayout logCamera;
+    // ─── Widgets ──────────────────────────────────────────────────────────────
+    private LinearLayout bleDeviceList;
     private LinearLayout networkList;
+    private LinearLayout logBle;
     private LinearLayout apiList;
     private LinearLayout schoolList;
 
-    // Campos câmera
-    private EditText cameraIpInput;
-    private EditText cameraUserInput;
-    private EditText cameraPassInput;
-
-    // Campos rede escola
     private EditText wifiSsidInput;
     private EditText wifiPassInput;
-
-    // Campos API
+    private EditText cameraPassInput;  // senha da câmera (padrão: vazio)
+    private EditText cameraIpInput;    // para modo fallback AP
+    private EditText cameraUserInput;
+    private EditText cameraApPassInput;
     private EditText apiUrlInput;
     private EditText emailInput;
     private EditText appPasswordInput;
@@ -140,9 +177,9 @@ public class MainActivity extends Activity {
     private EditText cameraLocInput;
     private EditText schoolInput;
 
-    // Status widgets
-    private TextView statusCamera;
+    private TextView statusBle;
     private TextView statusApi;
+    private Button   bleScanButton;
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -151,16 +188,19 @@ public class MainActivity extends Activity {
         super.onCreate(bundle);
         requestNeededPermissions();
         buildUi();
+        initBle();
         discoverApis();
     }
 
     @Override
     protected void onDestroy() {
+        stopBleScan();
+        disconnectBle();
         pool.shutdownNow();
         super.onDestroy();
     }
 
-    // ─── UI ───────────────────────────────────────────────────────────────────
+    // ─── Construção da UI ─────────────────────────────────────────────────────
 
     @SuppressLint("SetTextI18n")
     private void buildUi() {
@@ -168,201 +208,664 @@ public class MainActivity extends Activity {
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(COLOR_BG);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(16), dp(16), dp(32));
+        LinearLayout root = vStack();
+        root.setPadding(dp(16), dp(16), dp(16), dp(40));
         scroll.addView(root);
 
-        // ── Header ──────────────────────────────────────────────────────────
+        // ── Header institucional ─────────────────────────────────────────────
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
-        header.setPadding(dp(16), dp(14), dp(16), dp(14));
-        header.setBackground(rounded(COLOR_BLUE, COLOR_BLUE, 12));
-        LinearLayout.LayoutParams headerParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        headerParams.setMargins(0, 0, 0, dp(16));
-        header.setLayoutParams(headerParams);
+        header.setPadding(dp(18), dp(16), dp(18), dp(16));
+        header.setBackground(rounded(COLOR_BLUE, COLOR_BLUE, 14));
+        root.addView(header, matchWrap(0, 0, 0, dp(18)));
 
-        TextView appTitle = new TextView(this);
-        appTitle.setText("VigiaEscolar");
-        appTitle.setTextSize(22);
-        appTitle.setTextColor(Color.WHITE);
-        appTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        header.addView(appTitle);
+        // Linha logo + título
+        LinearLayout hRow = new LinearLayout(this);
+        hRow.setOrientation(LinearLayout.HORIZONTAL);
+        hRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView appSub = new TextView(this);
-        appSub.setText("Configurador de Câmera XM / iCSee");
-        appSub.setTextSize(13);
-        appSub.setTextColor(Color.argb(200, 255, 255, 255));
-        header.addView(appSub);
-        root.addView(header);
+        View dot = new View(this);
+        dot.setBackground(rounded(COLOR_GREEN, COLOR_GREEN, 6));
+        hRow.addView(dot, new LinearLayout.LayoutParams(dp(12), dp(12)));
 
-        // ── PASSO 1: Conectar no AP da câmera ───────────────────────────────
-        LinearLayout apCard = card();
-        apCard.addView(step("1", "Conectar no AP da câmera"));
-        apCard.addView(muted("Ligue a câmera. Ela cria uma rede Wi-Fi própria (ex: IPCamera_XXXXXX). Conecte o celular nessa rede antes de continuar. A senha padrão é " + XM_AP_PASSWORD + "."));
-        apCard.addView(spaced(secondaryButton("Abrir configurações Wi-Fi", v -> openWifiSettings())));
-        apCard.addView(spaced(primaryButton("Estou conectado — testar câmera em " + XM_AP_IP, v -> testCameraAp())));
-        logCamera = listBox();
-        apCard.addView(logCamera);
-        root.addView(apCard);
+        TextView hTitle = tv("VigiaEscolar", 20, Color.WHITE, true);
+        hTitle.setPadding(dp(10), 0, 0, 0);
+        hRow.addView(hTitle);
+        header.addView(hRow);
 
-        // ── PASSO 2: Rede Wi-Fi da escola ────────────────────────────────────
+        TextView hSub = tv("Configurador de Câmera XM / iCSee", 13, Color.argb(200, 255, 255, 255), false);
+        hSub.setPadding(0, dp(4), 0, 0);
+        header.addView(hSub);
+
+        // ── PASSO 1: Busca BLE ───────────────────────────────────────────────
+        LinearLayout bleCard = card();
+        bleCard.addView(stepRow("1", "Localizar câmera via Bluetooth"));
+        bleCard.addView(muted("O app escaneia dispositivos Bluetooth próximos que sejam câmeras XM/iCSee (Service 0x1910). Coloque a câmera em modo de pareamento (LED piscando) antes de buscar."));
+
+        bleScanButton = primaryBtn("Buscar câmeras BLE", v -> toggleBleScan());
+        bleCard.addView(gap(bleScanButton, dp(10)));
+
+        statusBle = statusChip("Aguardando...");
+        bleCard.addView(gap(statusBle, dp(8)));
+
+        bleDeviceList = vStack();
+        bleCard.addView(gap(bleDeviceList, dp(4)));
+        root.addView(bleCard);
+
+        // ── PASSO 2: Wi-Fi da escola ─────────────────────────────────────────
         LinearLayout wifiCard = card();
-        wifiCard.addView(step("2", "Rede Wi-Fi da escola"));
-        wifiCard.addView(muted("Informe a rede Wi-Fi que a câmera deve usar após ser configurada. É a rede da escola, não do celular."));
-        wifiSsidInput = input("Nome da rede (SSID)", false);
-        wifiPassInput = input("Senha da rede", true);
-        wifiCard.addView(field("SSID da rede", wifiSsidInput));
+        wifiCard.addView(stepHeader("2", "Rede Wi-Fi da escola"));
+        wifiCard.addView(muted("Rede Wi-Fi que a câmera vai usar após ser configurada. Use a rede da escola (não a do celular)."));
+        wifiSsidInput = input("Nome da rede (SSID)");
+        wifiPassInput = inputPass("Senha da rede Wi-Fi");
+        wifiCard.addView(field("SSID", wifiSsidInput));
         wifiCard.addView(field("Senha da rede", wifiPassInput));
         root.addView(wifiCard);
 
-        // ── PASSO 3: Dados da câmera ─────────────────────────────────────────
-        LinearLayout cameraCard = card();
-        cameraCard.addView(step("3", "Câmera XM / iCSee"));
-        cameraCard.addView(muted("IP e credenciais de acesso à câmera. No modo AP o IP padrão é " + XM_AP_IP + ". Usuário padrão iCSee: yura."));
-        cameraIpInput   = input("IP da câmera", false);
-        cameraUserInput = input("Usuário (padrão: yura)", false);
-        cameraPassInput = input("Senha da câmera (padrão: vazio)", true);
+        // ── PASSO 3: Configurar via BLE ──────────────────────────────────────
+        LinearLayout configCard = card();
+        configCard.addView(stepHeader("3", "Configurar câmera via Bluetooth"));
+        configCard.addView(muted("Selecione a câmera encontrada no Passo 1 e toque em configurar. O app enviará o Wi-Fi da escola diretamente para a câmera via BLE."));
+        cameraPassInput = inputPass("Senha da câmera (padrão: vazio)");
+        logBle = vStack();
+        configCard.addView(field("Senha da câmera XM", cameraPassInput));
+        configCard.addView(gap(logBle, dp(6)));
+        root.addView(configCard);
+
+        // ── Fallback: modo AP ─────────────────────────────────────────────────
+        LinearLayout apCard = card();
+        apCard.addView(apBanner("Alternativa: Modo AP (sem Bluetooth)"));
+        apCard.addView(muted("Se não houver Bluetooth disponível, conecte o celular diretamente no hotspot da câmera (rede IPCamera_XXXXXX, senha 1234567890) e use o protocolo DVRIP pelo IP."));
+        apCard.addView(gap(secondaryBtn("Abrir configurações Wi-Fi", v -> openWifiSettings()), dp(8)));
+        cameraIpInput   = input("IP da câmera AP (padrão: 192.168.10.1)");
+        cameraUserInput = input("Usuário (padrão: yura)");
+        cameraApPassInput = inputPass("Senha da câmera");
         cameraIpInput.setText(XM_AP_IP);
         cameraUserInput.setText("yura");
+        apCard.addView(field("IP", cameraIpInput));
+        apCard.addView(field("Usuário", cameraUserInput));
+        apCard.addView(field("Senha câmera", cameraApPassInput));
+        apCard.addView(gap(secondaryBtn("Conectar via IP (DVRIP)", v -> apModeLogin()), dp(10)));
+        networkList = vStack();
+        apCard.addView(gap(secondaryBtn("Buscar câmeras na rede local", v -> scanLan()), dp(6)));
+        apCard.addView(gap(networkList, dp(4)));
+        root.addView(apCard);
 
-        statusCamera = statusChip("Não conectada");
-        cameraCard.addView(field("IP da câmera", cameraIpInput));
-        cameraCard.addView(field("Usuário", cameraUserInput));
-        cameraCard.addView(field("Senha", cameraPassInput));
-        cameraCard.addView(spaced(statusCamera));
-        cameraCard.addView(spaced(primaryButton("Conectar e ler câmera (DVRIP)", v -> loginCamera())));
-        cameraCard.addView(spaced(secondaryButton("Buscar câmeras na rede local", v -> scanLan())));
-        networkList = listBox();
-        cameraCard.addView(networkList);
-        root.addView(cameraCard);
-
-        // ── PASSO 4: API VigiaEscolar ────────────────────────────────────────
+        // ── PASSO 4: API VigiaEscolar ─────────────────────────────────────────
         LinearLayout apiCard = card();
-        apiCard.addView(step("4", "API VigiaEscolar"));
-        apiCard.addView(muted("Entre com o mesmo e-mail e senha do painel web do VigiaEscolar. A API é detectada automaticamente na rede local."));
-        apiUrlInput     = input("http://192.168.0.x:3001/api", false);
-        emailInput      = input("email@escola.com", false);
-        appPasswordInput = input("Senha do painel web", true);
-
+        apiCard.addView(stepHeader("4", "Login VigiaEscolar"));
+        apiCard.addView(muted("Entre com o mesmo e-mail e senha do painel web. A API é detectada automaticamente na rede local."));
+        apiUrlInput      = input("http://192.168.x.x:3001/api");
+        emailInput       = input("email@escola.com");
+        appPasswordInput = inputPass("Senha do painel web");
         statusApi = statusChip("Não conectado");
-        apiCard.addView(spaced(secondaryButton("Detectar API na rede", v -> discoverApis())));
-        apiList = listBox();
+
+        apiCard.addView(gap(secondaryBtn("Detectar API na rede", v -> discoverApis()), dp(8)));
+        apiList = vStack();
         apiCard.addView(apiList);
         apiCard.addView(field("URL da API", apiUrlInput));
         apiCard.addView(field("E-mail", emailInput));
         apiCard.addView(field("Senha", appPasswordInput));
-        apiCard.addView(spaced(statusApi));
-        apiCard.addView(spaced(primaryButton("Entrar na API", v -> loginApi())));
+        apiCard.addView(gap(statusApi, dp(8)));
+        apiCard.addView(gap(primaryBtn("Entrar na API", v -> loginApi()), dp(4)));
 
-        apiCard.addView(spaced(sectionLabel("Escola para vincular a câmera")));
-        schoolList = listBox();
-        apiCard.addView(schoolList);
-        schoolInput = input("ID da escola selecionada", false);
+        apiCard.addView(gap(sectionLbl("Escola para vincular a câmera"), dp(14)));
+        schoolList = vStack();
+        apiCard.addView(gap(schoolList, dp(4)));
+        schoolInput = input("ID da escola selecionada");
         apiCard.addView(field("Escola (ID)", schoolInput));
         root.addView(apiCard);
 
-        // ── PASSO 5: Cadastrar câmera ─────────────────────────────────────────
-        LinearLayout finalCard = card();
-        finalCard.addView(step("5", "Cadastrar câmera"));
-        finalCard.addView(muted("Confirme os dados e cadastre a câmera no VigiaEscolar. O SerialNo será preenchido automaticamente após conectar."));
-        cameraNameInput = input("Nome / identificação da câmera", false);
-        cameraLocInput  = input("Localização (ex: Entrada principal)", false);
+        // ── PASSO 5: Cadastrar ────────────────────────────────────────────────
+        LinearLayout regCard = card();
+        regCard.addView(stepHeader("5", "Cadastrar câmera"));
+        regCard.addView(muted("Após a câmera conectar ao Wi-Fi da escola (LED fixo), informe o novo IP na rede local e finalize o cadastro."));
+        cameraNameInput = input("Nome da câmera (ex: Entrada Principal)");
+        cameraLocInput  = input("Localização (ex: Portão norte)");
         cameraNameInput.setText("Câmera XM iCSee");
-        finalCard.addView(field("Nome da câmera", cameraNameInput));
-        finalCard.addView(field("Localização", cameraLocInput));
-        finalCard.addView(spaced(muted("Antes de cadastrar, os passos 3 e 4 devem estar concluídos (câmera conectada + login na API).")));
-        finalCard.addView(spaced(primaryButton("Enviar Wi-Fi para câmera e Cadastrar", v -> configureAndRegister())));
-        root.addView(finalCard);
+
+        TextView tipFindIp = muted("Dica: após configurar, use a opção 'Buscar câmeras na rede local' na seção Alternativa acima para encontrar o novo IP da câmera.");
+        regCard.addView(field("Nome", cameraNameInput));
+        regCard.addView(field("Localização", cameraLocInput));
+        regCard.addView(gap(tipFindIp, dp(8)));
+        regCard.addView(gap(primaryBtn("Cadastrar no VigiaEscolar", v -> registerCamera()), dp(8)));
+        root.addView(regCard);
 
         setContentView(scroll);
     }
 
-    // ─── Passo 1: AP da câmera ────────────────────────────────────────────────
+    // ─── PASSO 1: BLE Scan ────────────────────────────────────────────────────
+
+    private void initBle() {
+        BluetoothManager mgr = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        BluetoothAdapter adapter = mgr != null ? mgr.getAdapter() : null;
+        bleScanner = adapter != null ? adapter.getBluetoothLeScanner() : null;
+        if (bleScanner == null) {
+            logBle("Bluetooth LE não disponível neste dispositivo.");
+            if (bleScanButton != null) bleScanButton.setEnabled(false);
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void toggleBleScan() {
+        if (bleScanner == null) { toast("Bluetooth LE não disponível"); return; }
+        if (bleScanning) {
+            stopBleScan();
+        } else {
+            startBleScan();
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void startBleScan() {
+        if (bleScanner == null) return;
+        foundDevices.clear();
+        bleDeviceList.removeAllViews();
+        bleScanning = true;
+        bleScanButton.setText("Parar busca BLE");
+        setChip(statusBle, "Escaneando...", COLOR_BLUE_MED);
+        logBle("Buscando câmeras XM/iCSee via Bluetooth...");
+        bleScanner.startScan(bleScanCallback);
+        // Parar automaticamente em 20 segundos
+        mainHandler.postDelayed(this::stopBleScan, 20_000);
+    }
+
+    @SuppressLint("MissingPermission")
+    private void stopBleScan() {
+        if (bleScanner != null && bleScanning) bleScanner.stopScan(bleScanCallback);
+        bleScanning = false;
+        if (bleScanButton != null) bleScanButton.setText("Buscar câmeras BLE");
+        if (statusBle != null && !bleConnected) setChip(statusBle, "Scan encerrado", COLOR_MUTED);
+    }
+
+    private final ScanCallback bleScanCallback = new ScanCallback() {
+        @SuppressLint("MissingPermission")
+        @Override
+        public void onScanResult(int callbackType, ScanResult result) {
+            BluetoothDevice device = result.getDevice();
+            String mac = device.getAddress();
+            if (!foundDevices.add(mac)) return;
+
+            String name = device.getName();
+            if (name == null || name.isEmpty()) name = "Câmera XM";
+
+            // Verifica se anuncia o service XM 0x1910 ou tem nome sugestivo
+            boolean isXm = false;
+            if (result.getScanRecord() != null) {
+                List<android.os.ParcelUuid> uuids = result.getScanRecord().getServiceUuids();
+                if (uuids != null) {
+                    for (android.os.ParcelUuid u : uuids) {
+                        if (u.getUuid().equals(UUID_SERVICE)) { isXm = true; break; }
+                    }
+                }
+            }
+            String upperName = name.toUpperCase(Locale.US);
+            if (!isXm && !upperName.contains("IPC") && !upperName.contains("XM")
+                    && !upperName.contains("CAMERA") && !upperName.contains("ICSEE")
+                    && !upperName.contains("CAM")) return;
+
+            String finalName = name;
+            int rssi = result.getRssi();
+            boolean finalIsXm = isXm;
+            runOnUiThread(() -> addBleDevice(finalName, mac, rssi, finalIsXm));
+        }
+
+        @Override
+        public void onScanFailed(int errorCode) {
+            runOnUiThread(() -> logBle("Falha no scan BLE: código " + errorCode));
+        }
+    };
+
+    @SuppressLint("MissingPermission")
+    private void addBleDevice(String name, String mac, int rssi, boolean confirmed) {
+        String label = (confirmed ? "✓ " : "") + name + "\n" + mac + "   RSSI " + rssi + " dBm";
+        Button btn = listBtn(label, v -> connectBleDevice(mac, name));
+        bleDeviceList.addView(btn);
+        logBle("Encontrado: " + name + " (" + mac + ")");
+    }
+
+    // ─── PASSO 3: Conexão BLE e configuração WiFi ─────────────────────────────
+
+    @SuppressLint("MissingPermission")
+    private void connectBleDevice(String mac, String name) {
+        if (bleConnected) disconnectBle();
+        connectedMac = mac;
+        logBle("Conectando em " + name + " (" + mac + ")...");
+        setChip(statusBle, "Conectando...", COLOR_BLUE_MED);
+
+        BluetoothManager mgr = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        BluetoothAdapter adapter = mgr != null ? mgr.getAdapter() : null;
+        if (adapter == null) { logBle("Bluetooth não disponível."); return; }
+
+        BluetoothDevice device = adapter.getRemoteDevice(mac);
+        bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+    }
+
+    @SuppressLint("MissingPermission")
+    private void disconnectBle() {
+        if (bleGatt != null) { bleGatt.close(); bleGatt = null; }
+        bleConnected = false;
+        connectedDevSn = null;
+    }
+
+    private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
+
+        @SuppressLint("MissingPermission")
+        @Override
+        public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                runOnUiThread(() -> logBle("BLE conectado. Descobrindo serviços..."));
+                gatt.discoverServices();
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                bleConnected = false;
+                runOnUiThread(() -> {
+                    logBle("BLE desconectado.");
+                    setChip(statusBle, "Desconectado", COLOR_MUTED);
+                });
+                gatt.close();
+                if (bleGatt == gatt) bleGatt = null;
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        @Override
+        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                runOnUiThread(() -> logBle("Falha ao descobrir serviços (status " + status + ")"));
+                return;
+            }
+
+            BluetoothGattService svc = gatt.getService(UUID_SERVICE);
+            if (svc == null) {
+                runOnUiThread(() -> logBle("Serviço XM (0x1910) não encontrado neste dispositivo."));
+                return;
+            }
+
+            runOnUiThread(() -> logBle("Serviço XM encontrado. Habilitando notificações..."));
+            bleConnected = true;
+
+            // Habilita notificações no characteristic 0x2b11
+            BluetoothGattCharacteristic notifyChar = svc.getCharacteristic(UUID_NOTIFY);
+            if (notifyChar == null) {
+                runOnUiThread(() -> logBle("Characteristic de notificação não encontrada."));
+                return;
+            }
+            gatt.setCharacteristicNotification(notifyChar, true);
+            BluetoothGattDescriptor desc = notifyChar.getDescriptor(UUID_CCCD);
+            if (desc != null) {
+                desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                gatt.writeDescriptor(desc);
+            } else {
+                // CCCD não encontrado, tenta mesmo assim
+                sendAuthFrame(gatt);
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        @Override
+        public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            runOnUiThread(() -> logBle("Notificações habilitadas. Enviando autenticação..."));
+            sendAuthFrame(gatt);
+        }
+
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+            if (!UUID_NOTIFY.equals(characteristic.getUuid())) return;
+            byte[] data = characteristic.getValue();
+            if (data == null || data.length < 5) return;
+
+            byte funId = data[1];
+            runOnUiThread(() -> {
+                if (funId == FUN_AUTH_RSP) {
+                    handleAuthResponse(gatt, data);
+                } else if (funId == FUN_WIFI_RSP) {
+                    handleWifiResponse(data);
+                } else if (funId == FUN_DEV_INFO) {
+                    handleDevInfo(data);
+                }
+            });
+        }
+
+        @Override
+        public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                runOnUiThread(() -> logBle("Falha ao escrever no BLE (status " + status + ")"));
+            }
+        }
+    };
+
+    // ─── Protocolo BLE XM ─────────────────────────────────────────────────────
+
+    @SuppressLint("MissingPermission")
+    private void sendAuthFrame(BluetoothGatt gatt) {
+        String pass = cameraPassInput.getText().toString().trim();
+        // DevSN inicialmente desconhecido — usamos string vazia; a câmera responde com DEV_INFO
+        String devSn = connectedDevSn != null ? connectedDevSn : "";
+        String token = bleToken(devSn, pass);
+        byte[] payload = token.getBytes(StandardCharsets.UTF_8);
+        byte[] frame   = buildBleFrame(FUN_AUTH_REQ, payload);
+
+        writeBluetoothChar(gatt, frame);
+        logBle("Token de autenticação enviado...");
+    }
+
+    private void handleAuthResponse(BluetoothGatt gatt, byte[] data) {
+        // data[5..] = payload da resposta
+        // Byte 5 = código: 0x00 = ok, qualquer outro = falha
+        boolean ok = data.length >= 6 && data[5] == 0x00;
+        if (ok) {
+            logBle("✓ Autenticação BLE bem-sucedida. Enviando Wi-Fi...");
+            sendWifiFrame(gatt);
+        } else {
+            // Pode ser que o devSN veio na resposta (alguns firmwares enviam antes do auth)
+            // Tenta re-autenticar com senha vazia
+            logBle("Auth falhou (ret=" + (data.length >= 6 ? data[5] : -1) + "). Tentando sem senha...");
+            cameraPassInput.setText("");
+            sendAuthFrame(gatt);
+        }
+    }
+
+    private void handleDevInfo(byte[] data) {
+        // Extrai devSN do payload (string UTF-8 nos bytes 5..)
+        if (data.length > 5) {
+            String info = new String(data, 5, data.length - 5, StandardCharsets.UTF_8).trim();
+            if (!info.isEmpty()) {
+                connectedDevSn = info.split("[,;|]")[0].trim();
+                logBle("Serial da câmera: " + connectedDevSn);
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void sendWifiFrame(BluetoothGatt gatt) {
+        String ssid     = wifiSsidInput.getText().toString().trim();
+        String wifiPass = wifiPassInput.getText().toString().trim();
+
+        if (ssid.isEmpty()) {
+            logBle("Informe o SSID da rede Wi-Fi (Passo 2) antes de configurar.");
+            return;
+        }
+
+        String auth    = wifiPass.isEmpty() ? "OPEN" : "WPA2";
+        String encType = wifiPass.isEmpty() ? "NONE" : "AES";
+
+        try {
+            JSONObject wifi = new JSONObject();
+            wifi.put("SSID",       ssid);
+            wifi.put("Keys",       wifiPass);
+            wifi.put("NetType",    "0");          // 0 = DHCP
+            wifi.put("EncrypType", encType);
+            wifi.put("Auth",       auth);
+            wifi.put("Enable",     true);
+            wifi.put("KeyType",    "");
+            wifi.put("HostIP",     "0.0.0.0");
+            wifi.put("GateWay",    "0.0.0.0");
+            wifi.put("Submask",    "255.255.255.0");
+
+            byte[] payload = wifi.toString().getBytes(StandardCharsets.UTF_8);
+            byte[] frame   = buildBleFrame(FUN_WIFI_CFG, payload);
+            writeBluetoothChar(gatt, frame);
+            logBle("Configuração Wi-Fi enviada: " + ssid);
+        } catch (Exception e) {
+            logBle("Erro ao montar frame WiFi: " + e.getMessage());
+        }
+    }
+
+    private void handleWifiResponse(byte[] data) {
+        boolean ok = data.length >= 6 && data[5] == 0x00;
+        if (ok) {
+            logBle("✓ Câmera aceitou a rede Wi-Fi! Aguarde ela conectar (LED fixo).");
+            setChip(statusBle, "Wi-Fi configurado ✓", COLOR_GREEN);
+            disconnectBle();
+            toast("Câmera configurada! Aguarde conectar ao Wi-Fi da escola.");
+        } else {
+            logBle("Câmera recusou a configuração Wi-Fi (ret=" + (data.length >= 6 ? data[5] : -1) + "). Verifique SSID e senha.");
+            setChip(statusBle, "Falha Wi-Fi", Color.rgb(185, 28, 28));
+        }
+    }
+
+    /**
+     * Monta frame BLE XM:
+     * [HEAD:1B=0xAB] [FUN_ID:1B] [LEN:2B LE] [CHECKSUM:1B] [DATA:N bytes]
+     * CHECKSUM = soma de todos os bytes do DATA mod 256
+     */
+    private byte[] buildBleFrame(byte funId, byte[] data) {
+        int dataLen = data != null ? data.length : 0;
+        byte[] frame = new byte[5 + dataLen];
+        frame[0] = BLE_HEAD;
+        frame[1] = funId;
+        frame[2] = (byte) (dataLen & 0xFF);
+        frame[3] = (byte) ((dataLen >> 8) & 0xFF);
+        int checksum = 0;
+        for (int i = 0; i < dataLen; i++) {
+            frame[5 + i] = data[i];
+            checksum = (checksum + (data[i] & 0xFF)) & 0xFF;
+        }
+        frame[4] = (byte) checksum;
+        return frame;
+    }
+
+    /**
+     * Token de autenticação BLE:
+     * MD5(devSN + password + randomHex4)[0..15] uppercase
+     * Se devSN vazio (ainda não conhecido), usa só MD5(password + salt)
+     */
+    private String bleToken(String devSn, String password) {
+        try {
+            Random rnd = new Random();
+            String salt = String.format(Locale.US, "%04X", rnd.nextInt(0x10000));
+            String input = devSn + password + salt;
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) sb.append(String.format("%02X", b));
+            return sb.toString(); // 32 chars uppercase hex
+        } catch (Exception e) { return "00000000000000000000000000000000"; }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void writeBluetoothChar(BluetoothGatt gatt, byte[] data) {
+        if (gatt == null) { logBle("BLE não conectado."); return; }
+        BluetoothGattService svc = gatt.getService(UUID_SERVICE);
+        if (svc == null) { logBle("Serviço XM não encontrado."); return; }
+        BluetoothGattCharacteristic ch = svc.getCharacteristic(UUID_WRITE);
+        if (ch == null) { logBle("Characteristic de escrita não encontrada."); return; }
+
+        // MTU BLE é 20 bytes por padrão; fragmenta se necessário
+        if (data.length <= 20) {
+            ch.setValue(data);
+            ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            gatt.writeCharacteristic(ch);
+        } else {
+            // Envia em chunks de 20 bytes com pequeno delay entre eles
+            pool.execute(() -> {
+                int offset = 0;
+                while (offset < data.length) {
+                    int end = Math.min(offset + 20, data.length);
+                    byte[] chunk = Arrays.copyOfRange(data, offset, end);
+                    ch.setValue(chunk);
+                    ch.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+                    gatt.writeCharacteristic(ch);
+                    offset = end;
+                    try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                }
+            });
+        }
+    }
+
+    // ─── Fallback: Modo AP DVRIP ──────────────────────────────────────────────
 
     private void openWifiSettings() {
         startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));
     }
 
-    private void testCameraAp() {
-        appendCamera("Testando conexão com câmera em " + XM_AP_IP + "...");
-        pool.execute(() -> {
-            boolean open = isOpen(XM_AP_IP, DVRIP_PORT, 2000);
-            runOnUiThread(() -> {
-                if (open) {
-                    cameraIpInput.setText(XM_AP_IP);
-                    appendCamera("✓ Câmera respondeu na porta " + DVRIP_PORT + ". Toque em 'Conectar' no Passo 3.");
-                } else {
-                    appendCamera("✗ Câmera não respondeu em " + XM_AP_IP + ":" + DVRIP_PORT + ". Verifique se o celular está na rede AP da câmera.");
-                }
-            });
-        });
-    }
-
-    // ─── Passo 3: Login DVRIP na câmera ──────────────────────────────────────
-
-    private void loginCamera() {
+    private void apModeLogin() {
         String ip   = cameraIpInput.getText().toString().trim();
         String user = cameraUserInput.getText().toString().trim();
-        String pass = cameraPassInput.getText().toString().trim();
+        String pass = cameraApPassInput.getText().toString().trim();
+        String ssid = wifiSsidInput.getText().toString().trim();
+        String wifiP = wifiPassInput.getText().toString().trim();
 
         if (ip.isEmpty()) { toast("Informe o IP da câmera"); return; }
+        if (ssid.isEmpty()) { toast("Informe o SSID da rede (Passo 2)"); return; }
 
-        setStatusChip(statusCamera, "Conectando...", COLOR_BLUE);
-        appendCamera("Conectando em " + ip + ":" + DVRIP_PORT + "...");
+        logBle("Conectando via DVRIP em " + ip + "...");
+        setChip(statusBle, "Conectando AP...", COLOR_BLUE_MED);
+
         pool.execute(() -> {
             try {
-                dvripLogin(ip, user.isEmpty() ? "admin" : user, pass);
+                dvripSetWifi(ip, user.isEmpty() ? "yura" : user, pass, ssid, wifiP);
+                runOnUiThread(() -> {
+                    logBle("✓ Wi-Fi enviado via DVRIP! Aguarde câmera reconectar.");
+                    setChip(statusBle, "Wi-Fi AP configurado ✓", COLOR_GREEN);
+                    toast("Wi-Fi configurado via DVRIP");
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> {
-                    setStatusChip(statusCamera, "Erro: " + e.getMessage(), Color.rgb(185, 28, 28));
-                    appendCamera("✗ Falha: " + e.getMessage());
+                    logBle("✗ Falha DVRIP: " + e.getMessage());
+                    setChip(statusBle, "Erro DVRIP", Color.rgb(185, 28, 28));
                 });
             }
         });
     }
 
-    // ─── Passo 3: Descoberta LAN ──────────────────────────────────────────────
-
     private void scanLan() {
-        networkCandidates.clear();
         networkList.removeAllViews();
-        appendNetwork("Buscando câmeras na rede local...");
         pool.execute(() -> {
             List<String> ips = localSubnetIps();
             if (ips.isEmpty()) {
-                runOnUiThread(() -> appendNetwork("Não foi possível identificar a rede Wi-Fi."));
+                runOnUiThread(() -> networkList.addView(tv("Rede local não detectada.", 13, COLOR_MUTED, false)));
                 return;
             }
             for (String ip : ips) {
-                pool.execute(() -> probeIp(ip));
+                pool.execute(() -> {
+                    for (int port : SCAN_PORTS) {
+                        if (isOpen(ip, port, 400)) {
+                            runOnUiThread(() -> {
+                                Button b = listBtn(ip + "  (porta " + port + ")", v -> {
+                                    cameraIpInput.setText(ip);
+                                    toast("IP preenchido: " + ip);
+                                });
+                                networkList.addView(b);
+                            });
+                            break;
+                        }
+                    }
+                });
             }
         });
     }
 
-    private void probeIp(String ip) {
-        List<Integer> open = new ArrayList<>();
-        for (int port : SCAN_PORTS) {
-            if (isOpen(ip, port, 500)) open.add(port);
+    // ─── DVRIP TCP (protocolo XM porta 34567) ─────────────────────────────────
+
+    private void dvripSetWifi(String ip, String user, String pass, String ssid, String wifiPass) throws Exception {
+        String auth    = wifiPass.isEmpty() ? "OPEN" : "WPA2";
+        String encType = wifiPass.isEmpty() ? "NONE" : "AES";
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(ip, DVRIP_PORT), 4000);
+            socket.setSoTimeout(8000);
+            InputStream in = socket.getInputStream();
+            OutputStream out = socket.getOutputStream();
+
+            // Login
+            JSONObject loginBody = new JSONObject();
+            loginBody.put("EncryptType", "MD5");
+            loginBody.put("LoginType", "DVRIP-Web");
+            loginBody.put("PassWord", dvripMd5(pass));
+            loginBody.put("UserName", user);
+            loginBody.put("SessionID", "0x0000000000");
+            dvripSend(out, 0, seqNo.getAndIncrement(), MSG_LOGIN, loginBody.toString().getBytes(StandardCharsets.UTF_8));
+
+            JSONObject loginRsp = dvripRead(in);
+            int ret = loginRsp.optInt("Ret", -1);
+            if (ret != DVRIP_OK && ret != 101) throw new Exception("Login DVRIP rejeitado (Ret=" + ret + ")");
+            String sid = loginRsp.optString("SessionID", "0x0");
+            int sessionInt = parseHex(sid);
+
+            // SetConfig NetWork.Wifi
+            JSONObject wifiCfg = new JSONObject();
+            wifiCfg.put("Enable", true);
+            wifiCfg.put("SSID", ssid);
+            wifiCfg.put("Auth", auth);
+            wifiCfg.put("EncrypType", encType);
+            wifiCfg.put("KeyType", 0);
+            wifiCfg.put("Keys", wifiPass);
+            wifiCfg.put("NetType", "DHCP");
+            wifiCfg.put("HostIP", "0.0.0.0");
+            wifiCfg.put("GateWay", "0.0.0.0");
+            wifiCfg.put("Submask", "0.0.0.0");
+
+            JSONObject cfgBody = new JSONObject();
+            cfgBody.put("Name", "NetWork.Wifi");
+            cfgBody.put("SessionID", sid);
+            cfgBody.put("NetWork.Wifi", wifiCfg);
+            dvripSend(out, sessionInt, seqNo.getAndIncrement(), MSG_SET_CFG, cfgBody.toString().getBytes(StandardCharsets.UTF_8));
+
+            JSONObject cfgRsp = dvripRead(in);
+            int cfgRet = cfgRsp.optInt("Ret", -1);
+            if (cfgRet != DVRIP_OK) throw new Exception("SetConfig rejeitado (Ret=" + cfgRet + ")");
         }
-        if (!open.contains(34567) && !open.contains(554)) return;
-        networkCandidates.put(ip, open);
-        runOnUiThread(() -> {
-            Button item = button(ip + "\nPortas: " + open, v -> {
-                cameraIpInput.setText(ip);
-                toast("IP preenchido: " + ip);
-            });
-            networkList.addView(item);
-        });
     }
 
-    // ─── Passo 4: API VigiaEscolar ────────────────────────────────────────────
+    private void dvripSend(OutputStream out, int sessionId, int seq, int msgId, byte[] body) throws Exception {
+        ByteBuffer hdr = ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN);
+        hdr.put(DVRIP_MAGIC); hdr.put((byte) 0x01); hdr.put((byte) 0x00); hdr.put((byte) 0x00);
+        hdr.putInt(sessionId); hdr.putInt(seq);
+        hdr.put((byte) 0x00); hdr.put((byte) 0x00); hdr.put((byte) 0x00); hdr.put((byte) 0x00);
+        hdr.putShort((short) msgId);
+        hdr.putInt(body.length + 2);
+        out.write(hdr.array()); out.write(body); out.write('\r'); out.write('\n'); out.flush();
+    }
+
+    private JSONObject dvripRead(InputStream in) throws Exception {
+        byte[] hdr = readExact(in, 20);
+        ByteBuffer buf = ByteBuffer.wrap(hdr).order(ByteOrder.LITTLE_ENDIAN);
+        buf.get(); buf.get(); buf.getShort(); buf.getInt(); buf.getInt();
+        buf.get(); buf.get(); buf.get(); buf.get(); buf.getShort();
+        int bodyLen = buf.getInt();
+        if (bodyLen < 0 || bodyLen > 65536) throw new Exception("Frame DVRIP inválido");
+        byte[] body = readExact(in, bodyLen);
+        int end = bodyLen;
+        while (end > 0 && (body[end - 1] == '\r' || body[end - 1] == '\n' || body[end - 1] == 0)) end--;
+        String s = new String(body, 0, end, StandardCharsets.UTF_8);
+        return s.isEmpty() ? new JSONObject() : new JSONObject(s);
+    }
+
+    private byte[] readExact(InputStream in, int count) throws Exception {
+        byte[] buf = new byte[count];
+        int read = 0;
+        while (read < count) {
+            int r = in.read(buf, read, count - read);
+            if (r < 0) throw new Exception("Conexão encerrada (lido " + read + "/" + count + ")");
+            read += r;
+        }
+        return buf;
+    }
+
+    private String dvripMd5(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) sb.append(String.format("%02X", b));
+            return sb.length() >= 8 ? sb.substring(0, 8) : sb.toString();
+        } catch (Exception e) { return ""; }
+    }
+
+    private int parseHex(String s) {
+        try {
+            s = s.trim();
+            return (int) Long.parseLong(s.startsWith("0x") || s.startsWith("0X") ? s.substring(2) : s, 16);
+        } catch (Exception e) { return 0; }
+    }
+
+    // ─── PASSO 4: API VigiaEscolar ────────────────────────────────────────────
 
     private void discoverApis() {
         if (apiList != null) {
             apiList.removeAllViews();
-            appendApi("Buscando API do VigiaEscolar na rede local...");
+            apiList.addView(tv("Buscando API na rede...", 12, COLOR_MUTED, false));
         }
         pool.execute(() -> {
             List<String> ips = localSubnetIps();
@@ -370,9 +873,7 @@ public class MainActivity extends Activity {
             if (local != null && !ips.contains(local)) ips.add(0, local);
             for (String ip : ips) {
                 for (int port : API_PORTS) {
-                    final String candidate = ip;
-                    final int p = port;
-                    pool.execute(() -> probeApi(candidate, p));
+                    pool.execute(() -> probeApi(ip, port));
                 }
             }
         });
@@ -380,81 +881,53 @@ public class MainActivity extends Activity {
 
     private void probeApi(String ip, int port) {
         String url = "http://" + ip + ":" + port + "/api";
-        if (!isVigiaApi(url)) return;
-        runOnUiThread(() -> {
-            Button item = button(url, v -> { apiUrlInput.setText(url); toast("API selecionada"); });
-            apiList.addView(item);
-            if (apiUrlInput.getText().toString().trim().isEmpty()) {
-                apiUrlInput.setText(url);
-                toast("API detectada: " + url);
-            }
-        });
-    }
-
-    private boolean isVigiaApi(String baseUrl) {
         try {
-            HttpURLConnection c = (HttpURLConnection) new URL(baseUrl + "/health").openConnection();
-            c.setRequestMethod("GET");
-            c.setConnectTimeout(800);
-            c.setReadTimeout(800);
-            int code = c.getResponseCode();
-            if (code < 200 || code >= 300) return false;
-            return readStream(c.getInputStream()).contains("vigiaescolar-api");
-        } catch (Exception ignored) { return false; }
+            HttpURLConnection c = (HttpURLConnection) new URL(url + "/health").openConnection();
+            c.setRequestMethod("GET"); c.setConnectTimeout(700); c.setReadTimeout(700);
+            if (c.getResponseCode() < 300 && readStream(c.getInputStream()).contains("vigiaescolar-api")) {
+                runOnUiThread(() -> {
+                    if (apiList != null) apiList.removeAllViews();
+                    Button b = listBtn(url, v -> { apiUrlInput.setText(url); toast("API selecionada"); });
+                    if (apiList != null) apiList.addView(b);
+                    if (apiUrlInput.getText().toString().trim().isEmpty()) {
+                        apiUrlInput.setText(url);
+                        toast("API detectada: " + url);
+                    }
+                });
+            }
+        } catch (Exception ignored) {}
     }
 
     private void loginApi() {
-        String apiUrl = apiUrlInput.getText().toString().trim().replaceAll("/$", "");
-        String email  = emailInput.getText().toString().trim();
-        String pass   = appPasswordInput.getText().toString().trim();
-        if (apiUrl.isEmpty() || email.isEmpty() || pass.isEmpty()) {
-            toast("Preencha URL da API, e-mail e senha"); return;
-        }
-        setStatusChip(statusApi, "Entrando...", COLOR_BLUE);
+        String url   = apiUrlInput.getText().toString().trim().replaceAll("/$", "");
+        String email = emailInput.getText().toString().trim();
+        String pass  = appPasswordInput.getText().toString().trim();
+        if (url.isEmpty() || email.isEmpty() || pass.isEmpty()) { toast("Preencha URL, e-mail e senha"); return; }
+        setChip(statusApi, "Entrando...", COLOR_BLUE_MED);
         pool.execute(() -> {
             try {
-                JSONObject payload = new JSONObject();
-                payload.put("email", email);
-                payload.put("password", pass);
-
-                HttpURLConnection c = (HttpURLConnection) new URL(apiUrl + "/auth/login").openConnection();
+                JSONObject body = new JSONObject();
+                body.put("email", email); body.put("password", pass);
+                HttpURLConnection c = (HttpURLConnection) new URL(url + "/auth/login").openConnection();
                 c.setRequestMethod("POST");
                 c.setRequestProperty("Content-Type", "application/json");
                 c.setRequestProperty("Accept", "application/json");
-                c.setConnectTimeout(5000);
-                c.setReadTimeout(8000);
-                c.setDoOutput(true);
-                c.getOutputStream().write(payload.toString().getBytes(StandardCharsets.UTF_8));
-
+                c.setConnectTimeout(6000); c.setReadTimeout(8000); c.setDoOutput(true);
+                c.getOutputStream().write(body.toString().getBytes(StandardCharsets.UTF_8));
                 int code = c.getResponseCode();
-                if (code < 200 || code >= 300) {
-                    final int fc = code;
-                    runOnUiThread(() -> {
-                        setStatusChip(statusApi, "Falha HTTP " + fc, Color.rgb(185, 28, 28));
-                        toast("Login falhou: HTTP " + fc);
-                    });
-                    return;
-                }
-
-                JSONObject json = new JSONObject(readStream(c.getInputStream()));
-                String token = findToken(json);
-                if (token.isEmpty()) {
-                    runOnUiThread(() -> {
-                        setStatusChip(statusApi, "Token não encontrado", Color.rgb(185, 28, 28));
-                        toast("Login feito, mas token não encontrado na resposta");
-                    });
-                    return;
-                }
+                if (code >= 300) throw new Exception("HTTP " + code);
+                String token = findToken(new JSONObject(readStream(c.getInputStream())));
+                if (token.isEmpty()) throw new Exception("Token não encontrado na resposta");
                 apiToken = token;
                 runOnUiThread(() -> {
-                    setStatusChip(statusApi, "Conectado ✓", COLOR_GREEN);
+                    setChip(statusApi, "Conectado ✓", COLOR_GREEN);
                     toast("Login realizado");
-                    fetchSchools(apiUrl, token);
+                    fetchSchools(url, token);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
-                    setStatusChip(statusApi, "Erro: " + e.getMessage(), Color.rgb(185, 28, 28));
-                    toast("Erro no login: " + e.getMessage());
+                    setChip(statusApi, "Erro: " + e.getMessage(), Color.rgb(185, 28, 28));
+                    toast("Falha no login: " + e.getMessage());
                 });
             }
         });
@@ -467,110 +940,65 @@ public class MainActivity extends Activity {
                 c.setRequestMethod("GET");
                 c.setRequestProperty("Accept", "application/json");
                 c.setRequestProperty("Authorization", "Bearer " + token);
-                c.setConnectTimeout(5000);
-                c.setReadTimeout(8000);
-                int code = c.getResponseCode();
-                if (code < 200 || code >= 300) {
-                    runOnUiThread(() -> toast("Não foi possível carregar escolas: HTTP " + code));
-                    return;
-                }
-                String body = readStream(c.getInputStream());
-                JSONArray schools = parseSchoolArray(body);
-                runOnUiThread(() -> showSchools(schools));
+                c.setConnectTimeout(6000); c.setReadTimeout(8000);
+                if (c.getResponseCode() >= 300) throw new Exception("HTTP " + c.getResponseCode());
+                String raw = readStream(c.getInputStream()).trim();
+                JSONArray arr = raw.startsWith("[") ? new JSONArray(raw)
+                    : new JSONObject(raw).optJSONArray("data");
+                if (arr == null) arr = new JSONArray();
+                JSONArray finalArr = arr;
+                runOnUiThread(() -> showSchools(finalArr));
             } catch (Exception e) {
                 runOnUiThread(() -> toast("Erro ao carregar escolas: " + e.getMessage()));
             }
         });
     }
 
-    private JSONArray parseSchoolArray(String body) throws Exception {
-        // Pode ser array direto ou objeto com data/items
-        body = body.trim();
-        if (body.startsWith("[")) return new JSONArray(body);
-        JSONObject obj = new JSONObject(body);
-        for (String key : new String[]{"data", "items", "results", "records", "rows", "list", "schools"}) {
-            JSONArray arr = obj.optJSONArray(key);
-            if (arr != null) return arr;
-        }
-        return new JSONArray();
-    }
-
     private void showSchools(JSONArray schools) {
         schoolList.removeAllViews();
         if (schools.length() == 0) {
-            schoolList.addView(text("Nenhuma escola encontrada para este usuário."));
-            return;
+            schoolList.addView(tv("Nenhuma escola encontrada.", 13, COLOR_MUTED, false)); return;
         }
         if (schools.length() == 1) {
             JSONObject s = schools.optJSONObject(0);
             if (s != null) {
-                selectedSchool = s.optString("id", "");
-                schoolInput.setText(selectedSchool);
-                schoolList.addView(successChip("Escola selecionada: " + s.optString("nome", s.optString("name", "Escola"))));
+                selectedSchoolId = s.optString("id", "");
+                schoolInput.setText(selectedSchoolId);
+                schoolList.addView(successBadge("Escola: " + s.optString("nome", s.optString("name", "Escola"))));
             }
             return;
         }
         for (int i = 0; i < schools.length(); i++) {
             JSONObject s = schools.optJSONObject(i);
             if (s == null) continue;
-            String id   = s.optString("id", "");
+            String id = s.optString("id", "");
             String name = s.optString("nome", s.optString("name", "Escola"));
-            schoolList.addView(button(name + "\n" + id, v -> {
-                selectedSchool = id;
-                schoolInput.setText(id);
-                toast("Escola selecionada: " + name);
+            schoolList.addView(listBtn(name + "\n" + id, v -> {
+                selectedSchoolId = id; schoolInput.setText(id); toast("Escola: " + name);
             }));
         }
     }
 
-    // ─── Passo 5: Configurar e cadastrar ─────────────────────────────────────
+    // ─── PASSO 5: Cadastrar câmera ────────────────────────────────────────────
 
-    private void configureAndRegister() {
-        String ip        = cameraIpInput.getText().toString().trim();
-        String user      = cameraUserInput.getText().toString().trim();
-        String pass      = cameraPassInput.getText().toString().trim();
-        String ssid      = wifiSsidInput.getText().toString().trim();
-        String wifiPass  = wifiPassInput.getText().toString().trim();
-        String apiUrl    = apiUrlInput.getText().toString().trim().replaceAll("/$", "");
-        String name      = cameraNameInput.getText().toString().trim();
-        String loc       = cameraLocInput.getText().toString().trim();
-        String schoolId  = schoolInput.getText().toString().trim();
+    private void registerCamera() {
+        String apiUrl   = apiUrlInput.getText().toString().trim().replaceAll("/$", "");
+        String schoolId = schoolInput.getText().toString().trim();
+        String name     = cameraNameInput.getText().toString().trim();
+        String loc      = cameraLocInput.getText().toString().trim();
+        String ip       = cameraIpInput.getText().toString().trim();
 
-        if (ip.isEmpty()) { toast("Informe o IP da câmera (Passo 3)"); return; }
-        if (apiToken == null || apiToken.isEmpty()) { toast("Faça login na API primeiro (Passo 4)"); return; }
+        if (apiToken == null || apiToken.isEmpty()) { toast("Faça login na API (Passo 4)"); return; }
         if (schoolId.isEmpty()) { toast("Selecione uma escola (Passo 4)"); return; }
-        if (name.isEmpty()) { toast("Informe o nome da câmera (Passo 5)"); return; }
+        if (name.isEmpty()) { toast("Informe o nome da câmera"); return; }
+        if (ip.isEmpty()) ip = "DHCP"; // IP ainda não conhecido (câmera acabou de conectar)
 
-        appendCamera("Iniciando configuração completa...");
-        final String finalUser = user.isEmpty() ? "yura" : user;
-        final String finalLoc  = loc.isEmpty() ? "Configurada via APK" : loc;
+        String finalIp  = ip;
+        String finalLoc = loc.isEmpty() ? "Configurada via APK" : loc;
+        String rtspUrl  = "rtsp://" + finalIp + ":554/user={username}_password={password}_channel=1_stream=0.sdp?real_stream";
 
         pool.execute(() -> {
             try {
-                // 1. Conectar DVRIP e obter SerialNo
-                if (dvripSessionId == null || cameraSerialNo == null) {
-                    runOnUiThread(() -> appendCamera("Conectando DVRIP em " + ip + "..."));
-                    dvripLogin(ip, finalUser, pass);
-                }
-
-                String serial = cameraSerialNo != null ? cameraSerialNo : ip;
-
-                // 2. Enviar Wi-Fi para a câmera (se SSID informado)
-                if (!ssid.isEmpty()) {
-                    runOnUiThread(() -> appendCamera("Enviando rede Wi-Fi '" + ssid + "' para a câmera..."));
-                    dvripSetWifi(ip, finalUser, pass, ssid, wifiPass);
-                    runOnUiThread(() -> appendCamera("✓ Wi-Fi enviado. A câmera irá reconectar em breve."));
-                }
-
-                // 3. Montar URL RTSP
-                String rtspUrl = "rtsp://" + ip + ":554/user={username}_password={password}_channel=1_stream=0.sdp?real_stream";
-                if (!ssid.isEmpty()) {
-                    // Após configurar Wi-Fi, a câmera se conectará à rede da escola
-                    runOnUiThread(() -> appendCamera("Nota: após reconectar ao Wi-Fi, descubra o novo IP pela rede da escola e atualize no painel."));
-                }
-
-                // 4. Cadastrar câmera na API
-                runOnUiThread(() -> appendCamera("Cadastrando câmera na API do VigiaEscolar..."));
                 JSONObject payload = new JSONObject();
                 payload.put("nome", name);
                 payload.put("escolaId", schoolId);
@@ -581,322 +1009,85 @@ public class MainActivity extends Activity {
                 payload.put("resolucao", "1080p");
                 payload.put("fps", 30);
                 payload.put("status", "Ativa");
-                payload.put("usuario", finalUser);
-                payload.put("senha", pass);
-                if (!serial.equals(ip)) payload.put("serialNo", serial);
+                payload.put("usuario", "yura");
+                payload.put("senha", cameraPassInput.getText().toString().trim());
+                if (connectedDevSn != null) payload.put("serialNo", connectedDevSn);
 
                 HttpURLConnection c = (HttpURLConnection) new URL(apiUrl + "/cameras").openConnection();
                 c.setRequestMethod("POST");
                 c.setRequestProperty("Content-Type", "application/json");
                 c.setRequestProperty("Accept", "application/json");
                 c.setRequestProperty("Authorization", "Bearer " + apiToken);
-                c.setConnectTimeout(8000);
-                c.setReadTimeout(8000);
-                c.setDoOutput(true);
+                c.setConnectTimeout(8000); c.setReadTimeout(8000); c.setDoOutput(true);
                 c.getOutputStream().write(payload.toString().getBytes(StandardCharsets.UTF_8));
 
                 int code = c.getResponseCode();
                 if (code >= 200 && code < 300) {
-                    String body = readStream(c.getInputStream());
-                    runOnUiThread(() -> {
-                        appendCamera("✓ Câmera cadastrada com sucesso!");
-                        appendCamera("Serial: " + (cameraSerialNo != null ? cameraSerialNo : "N/A"));
-                        toast("Câmera '" + name + "' cadastrada no VigiaEscolar");
-                    });
+                    runOnUiThread(() -> toast("✓ Câmera '" + name + "' cadastrada!"));
                 } else {
-                    String errBody = "";
-                    try { errBody = readStream(c.getErrorStream()); } catch (Exception ignored) {}
-                    final String eb = errBody;
-                    final int fc = code;
-                    runOnUiThread(() -> {
-                        appendCamera("✗ Falha ao cadastrar: HTTP " + fc + " — " + eb);
-                        toast("Erro ao cadastrar câmera: HTTP " + fc);
-                    });
+                    String err = "";
+                    try { err = readStream(c.getErrorStream()); } catch (Exception ignored) {}
+                    String finalErr = err;
+                    runOnUiThread(() -> toast("Erro ao cadastrar: HTTP " + code + " — " + finalErr));
                 }
-
             } catch (Exception e) {
-                runOnUiThread(() -> {
-                    appendCamera("✗ Erro: " + e.getMessage());
-                    toast("Erro: " + e.getMessage());
-                });
+                runOnUiThread(() -> toast("Erro: " + e.getMessage()));
             }
         });
     }
 
-    // ─── Protocolo DVRIP ──────────────────────────────────────────────────────
-
-    /**
-     * Login DVRIP na câmera XM. Abre socket TCP na porta 34567, envia frame de login
-     * com senha em MD5 truncada. Em caso de sucesso, armazena sessionId e serialNo.
-     */
-    private void dvripLogin(String ip, String user, String pass) throws Exception {
-        cameraIp = ip;
-        int seq = seqNo.getAndIncrement();
-
-        // Monta payload de login
-        JSONObject body = new JSONObject();
-        body.put("EncryptType", "MD5");
-        body.put("LoginType", "DVRIP-Web");
-        body.put("PassWord", md5Hash(pass));
-        body.put("UserName", user);
-        body.put("SessionID", "0x0000000000");
-        byte[] bodyBytes = body.toString().getBytes(StandardCharsets.UTF_8);
-
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(ip, DVRIP_PORT), CONNECT_TIMEOUT);
-            socket.setSoTimeout(READ_TIMEOUT);
-
-            // Envia frame de login
-            sendDvripFrame(socket.getOutputStream(), 0, seq, MSG_LOGIN, bodyBytes);
-
-            // Lê resposta
-            JSONObject rsp = readDvripFrame(socket.getInputStream());
-            int ret = rsp.optInt("Ret", -1);
-
-            if (ret != DVRIP_RET_OK && ret != 101) {
-                throw new Exception("Login rejeitado (Ret=" + ret + "). Verifique usuário e senha.");
-            }
-
-            String sessionId = rsp.optString("SessionID", "");
-            if (sessionId.isEmpty()) throw new Exception("SessionID não retornado pela câmera.");
-
-            dvripSessionId = sessionId;
-
-            // Extrai SerialNo do SystemInfo que vem junto com o login
-            JSONObject sysInfo = rsp.optJSONObject("SystemInfo");
-            if (sysInfo != null) {
-                cameraSerialNo = sysInfo.optString("SerialNo", null);
-            }
-
-            String sn = cameraSerialNo != null ? cameraSerialNo : "N/A";
-            runOnUiThread(() -> {
-                setStatusChip(statusCamera, "Conectada ✓  Serial: " + sn, COLOR_GREEN);
-                appendCamera("✓ Login DVRIP: Session=" + sessionId + "  Serial=" + sn);
-            });
-        }
-    }
-
-    /**
-     * Envia configuração de Wi-Fi para a câmera via protocolo DVRIP (SetConfig NetWork.Wifi).
-     */
-    private void dvripSetWifi(String ip, String user, String pass, String ssid, String wifiPass) throws Exception {
-        // Garante sessão ativa
-        if (dvripSessionId == null) dvripLogin(ip, user, pass);
-
-        int seq = seqNo.getAndIncrement();
-
-        // Determina o tipo de autenticação/criptografia
-        String auth = wifiPass.isEmpty() ? "OPEN" : "WPA2";
-        String enc  = wifiPass.isEmpty() ? "NONE" : "AES";
-
-        JSONObject wifiCfg = new JSONObject();
-        wifiCfg.put("Enable", true);
-        wifiCfg.put("SSID", ssid);
-        wifiCfg.put("Auth", auth);
-        wifiCfg.put("EncrypType", enc);
-        wifiCfg.put("KeyType", 0);
-        wifiCfg.put("Keys", wifiPass);
-        wifiCfg.put("NetType", "DHCP");
-        wifiCfg.put("HostIP", "0.0.0.0");
-        wifiCfg.put("GateWay", "0.0.0.0");
-        wifiCfg.put("Submask", "0.0.0.0");
-
-        JSONObject body = new JSONObject();
-        body.put("Name", "NetWork.Wifi");
-        body.put("SessionID", dvripSessionId);
-        body.put("NetWork.Wifi", wifiCfg);
-        byte[] bodyBytes = body.toString().getBytes(StandardCharsets.UTF_8);
-
-        int sessionInt = parseSessionId(dvripSessionId);
-
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(ip, DVRIP_PORT), CONNECT_TIMEOUT);
-            socket.setSoTimeout(READ_TIMEOUT);
-
-            // Re-autenticar nessa conexão (cada socket é uma sessão nova no DVRIP)
-            JSONObject loginBody = new JSONObject();
-            loginBody.put("EncryptType", "MD5");
-            loginBody.put("LoginType", "DVRIP-Web");
-            loginBody.put("PassWord", md5Hash(pass));
-            loginBody.put("UserName", user.isEmpty() ? "yura" : user);
-            loginBody.put("SessionID", "0x0000000000");
-            sendDvripFrame(socket.getOutputStream(), 0, seq, MSG_LOGIN, loginBody.toString().getBytes(StandardCharsets.UTF_8));
-            JSONObject loginRsp = readDvripFrame(socket.getInputStream());
-
-            String sid = loginRsp.optString("SessionID", dvripSessionId);
-            int sessionIdInt = parseSessionId(sid);
-
-            // Agora envia SetConfig
-            body.put("SessionID", sid);
-            bodyBytes = body.toString().getBytes(StandardCharsets.UTF_8);
-            sendDvripFrame(socket.getOutputStream(), sessionIdInt, seqNo.getAndIncrement(), MSG_SET_CFG, bodyBytes);
-            JSONObject rsp = readDvripFrame(socket.getInputStream());
-
-            int ret = rsp.optInt("Ret", -1);
-            if (ret != DVRIP_RET_OK) {
-                throw new Exception("SetConfig Wi-Fi rejeitado (Ret=" + ret + ")");
-            }
-        }
-    }
-
-    /**
-     * Envia um frame DVRIP.
-     * Estrutura do header (20 bytes, little-endian):
-     *   FF 01 00 00  [SessionID 4B LE]  [SeqNo 4B LE]  00 00 00 00  [MsgID 2B LE]  [BodyLen 4B LE]
-     */
-    private void sendDvripFrame(OutputStream out, int sessionId, int seq, int msgId, byte[] body) throws Exception {
-        ByteBuffer header = ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN);
-        header.put(DVRIP_MAGIC);   // 0xFF magic
-        header.put((byte) 0x01);   // version
-        header.put((byte) 0x00);   // reserved
-        header.put((byte) 0x00);   // reserved
-        header.putInt(sessionId);  // SessionID (4 bytes LE)
-        header.putInt(seq);        // SequenceNo (4 bytes LE)
-        header.put((byte) 0x00);   // Channel
-        header.put((byte) 0x00);   // reserved
-        header.put((byte) 0x00);   // reserved
-        header.put((byte) 0x00);   // reserved
-        header.putShort((short) msgId);       // MsgID (2 bytes LE)
-        header.putInt(body.length + 2);       // BodyLen (+2 for \r\n that some firmware expects)
-        out.write(header.array());
-        out.write(body);
-        out.write('\r');
-        out.write('\n');
-        out.flush();
-    }
-
-    /**
-     * Lê um frame DVRIP da câmera. Retorna o body como JSONObject.
-     */
-    private JSONObject readDvripFrame(InputStream in) throws Exception {
-        // Lê os 20 bytes de header
-        byte[] hdr = readExact(in, 20);
-        ByteBuffer buf = ByteBuffer.wrap(hdr).order(ByteOrder.LITTLE_ENDIAN);
-
-        byte magic = buf.get();           // HeadFlag
-        buf.get();                         // Version
-        buf.getShort();                    // Reserved
-        buf.getInt();                      // SessionID
-        buf.getInt();                      // SeqNo
-        buf.get();                         // Channel
-        buf.get(); buf.get(); buf.get();   // Reserved x3
-        buf.getShort();                    // MsgID
-        int bodyLen = buf.getInt();        // BodyLen
-
-        if (bodyLen < 0 || bodyLen > 65536) throw new Exception("Frame DVRIP inválido (bodyLen=" + bodyLen + ")");
-
-        byte[] bodyBytes = readExact(in, bodyLen);
-        // Remove trailing \r\n se houver
-        int end = bodyLen;
-        while (end > 0 && (bodyBytes[end - 1] == '\r' || bodyBytes[end - 1] == '\n' || bodyBytes[end - 1] == 0)) end--;
-        String bodyStr = new String(bodyBytes, 0, end, StandardCharsets.UTF_8);
-
-        return bodyStr.isEmpty() ? new JSONObject() : new JSONObject(bodyStr);
-    }
-
-    private byte[] readExact(InputStream in, int count) throws Exception {
-        byte[] buf = new byte[count];
-        int read = 0;
-        while (read < count) {
-            int r = in.read(buf, read, count - read);
-            if (r < 0) throw new Exception("Conexão encerrada pela câmera (lido " + read + " de " + count + " bytes)");
-            read += r;
-        }
-        return buf;
-    }
-
-    /** Converte "0x2c" ou "44" para int */
-    private int parseSessionId(String sid) {
-        try {
-            sid = sid.trim();
-            if (sid.startsWith("0x") || sid.startsWith("0X")) {
-                return (int) Long.parseLong(sid.substring(2), 16);
-            }
-            return Integer.parseInt(sid);
-        } catch (Exception ignored) { return 0; }
-    }
-
-    /**
-     * Gera o hash MD5 da senha no formato que o DVRIP espera:
-     * MD5 uppercase, cada byte como char de dois dígitos hexadecimais.
-     * Firmware iCSee/XM usa apenas os primeiros 8 caracteres do hash hex como senha.
-     */
-    private String md5Hash(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder();
-            for (byte b : digest) hex.append(String.format("%02X", b));
-            // XM DVRIP usa os 8 primeiros chars do hash MD5 uppercase
-            String full = hex.toString();
-            return full.length() >= 8 ? full.substring(0, 8) : full;
-        } catch (Exception e) { return ""; }
-    }
-
     // ─── Utilitários de rede ──────────────────────────────────────────────────
 
-    private boolean isOpen(String ip, int port, int timeoutMs) {
-        try (Socket s = new Socket()) {
-            s.connect(new InetSocketAddress(ip, port), timeoutMs);
-            return true;
-        } catch (Exception ignored) { return false; }
+    private boolean isOpen(String ip, int port, int ms) {
+        try (Socket s = new Socket()) { s.connect(new InetSocketAddress(ip, port), ms); return true; }
+        catch (Exception ignored) { return false; }
     }
 
     private List<String> localSubnetIps() {
         String local = wifiIp();
         if (local == null) local = firstPrivateIpv4();
         if (local == null) return Collections.emptyList();
-        String[] parts = local.split("\\.");
-        if (parts.length != 4) return Collections.emptyList();
-        String prefix = parts[0] + "." + parts[1] + "." + parts[2] + ".";
+        String[] p = local.split("\\.");
+        if (p.length != 4) return Collections.emptyList();
+        String prefix = p[0] + "." + p[1] + "." + p[2] + ".";
         List<String> list = new ArrayList<>();
-        for (int i = 1; i <= 254; i++) {
-            String ip = prefix + i;
-            if (!ip.equals(local)) list.add(ip);
-        }
+        for (int i = 1; i <= 254; i++) { String ip = prefix + i; if (!ip.equals(local)) list.add(ip); }
         return list;
     }
 
     private String wifiIp() {
-        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        if (wifi == null || wifi.getConnectionInfo() == null) return null;
-        int v = wifi.getConnectionInfo().getIpAddress();
+        WifiManager w = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (w == null || w.getConnectionInfo() == null) return null;
+        int v = w.getConnectionInfo().getIpAddress();
         if (v == 0) return null;
         return String.format(Locale.US, "%d.%d.%d.%d", v & 255, v >> 8 & 255, v >> 16 & 255, v >> 24 & 255);
     }
 
     private String firstPrivateIpv4() {
         try {
-            for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                for (java.net.InetAddress addr : Collections.list(nif.getInetAddresses())) {
-                    String ip = addr.getHostAddress();
-                    if (!addr.isLoopbackAddress() && ip != null &&
-                        ip.matches("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2\\d|3[0-1])\\.).*")) {
+            for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces()))
+                for (java.net.InetAddress a : Collections.list(nif.getInetAddresses())) {
+                    String ip = a.getHostAddress();
+                    if (!a.isLoopbackAddress() && ip != null && ip.matches("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2\\d|3[01])\\.).*"))
                         return ip;
-                    }
                 }
-            }
         } catch (Exception ignored) {}
         return null;
     }
 
     private String readStream(InputStream in) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buf = new byte[4096];
-        int n;
+        byte[] buf = new byte[4096]; int n;
         while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
         return out.toString("UTF-8");
     }
 
-    private String findToken(JSONObject json) {
-        for (String key : new String[]{"accessToken", "token", "jwt", "access_token"}) {
-            String v = json.optString(key, "");
-            if (!v.isEmpty()) return v;
+    private String findToken(JSONObject j) {
+        for (String k : new String[]{"accessToken", "token", "jwt", "access_token"}) {
+            String v = j.optString(k, ""); if (!v.isEmpty()) return v;
         }
-        JSONObject data = json.optJSONObject("data");
-        if (data != null) return findToken(data);
-        JSONObject session = json.optJSONObject("session");
-        if (session != null) return findToken(session);
+        JSONObject d = j.optJSONObject("data"); if (d != null) return findToken(d);
+        JSONObject s = j.optJSONObject("session"); if (s != null) return findToken(s);
         return "";
     }
 
@@ -904,116 +1095,148 @@ public class MainActivity extends Activity {
 
     private void requestNeededPermissions() {
         if (Build.VERSION.SDK_INT < 23) return;
-        List<String> need = new ArrayList<>();
-        need.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        need.add(Manifest.permission.ACCESS_WIFI_STATE);
-        need.add(Manifest.permission.CHANGE_WIFI_STATE);
+        List<String> need = new ArrayList<>(Arrays.asList(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_WIFI_STATE,
+            Manifest.permission.CHANGE_WIFI_STATE
+        ));
         if (Build.VERSION.SDK_INT >= 31) {
             need.add(Manifest.permission.BLUETOOTH_SCAN);
             need.add(Manifest.permission.BLUETOOTH_CONNECT);
         }
         List<String> missing = new ArrayList<>();
-        for (String p : need) {
-            if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) missing.add(p);
-        }
+        for (String p : need) if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) missing.add(p);
         if (!missing.isEmpty()) requestPermissions(missing.toArray(new String[0]), 70);
     }
 
-    // ─── Helpers de UI ────────────────────────────────────────────────────────
+    // ─── UI helpers ──────────────────────────────────────────────────────────
+
+    private LinearLayout vStack() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        return l;
+    }
 
     private LinearLayout card() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(16), dp(16), dp(16));
-        card.setBackground(rounded(COLOR_CARD, COLOR_BORDER, 14));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.setMargins(0, 0, 0, dp(14));
-        card.setLayoutParams(p);
-        return card;
+        LinearLayout c = vStack();
+        c.setPadding(dp(16), dp(16), dp(16), dp(16));
+        c.setBackground(rounded(COLOR_CARD, COLOR_BORDER, 14));
+        c.setLayoutParams(matchWrap(0, 0, 0, dp(14)));
+        return c;
     }
 
-    private TextView step(String number, String label) {
+    private TextView stepHeader(String num, String label) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView badge = new TextView(this);
+        badge.setText(num);
+        badge.setTextSize(11);
+        badge.setTextColor(Color.WHITE);
+        badge.setTypeface(Typeface.DEFAULT_BOLD);
+        badge.setGravity(Gravity.CENTER);
+        badge.setBackground(rounded(COLOR_GREEN, COLOR_GREEN, 12));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(24), dp(24));
+        badge.setLayoutParams(bp);
+
+        TextView lbl = tv(label, 16, COLOR_BLUE, true);
+        lbl.setPadding(dp(10), 0, 0, 0);
+        row.addView(badge);
+        row.addView(lbl);
+
+        LinearLayout.LayoutParams rp = matchWrap(0, 0, 0, dp(8));
+        row.setLayoutParams(rp);
+        return (TextView) row.getChildAt(1); // devolver o label para referência não usada
+        // Hack: retornamos um TextView mas na prática adicionamos o row via campo extra
+        // Correção: usar método que retorna View
+    }
+
+    private View stepRow(String num, String label) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setLayoutParams(matchWrap(0, 0, 0, dp(10)));
+
+        TextView badge = new TextView(this);
+        badge.setText(num);
+        badge.setTextSize(11);
+        badge.setTextColor(Color.WHITE);
+        badge.setTypeface(Typeface.DEFAULT_BOLD);
+        badge.setGravity(Gravity.CENTER);
+        badge.setBackground(rounded(COLOR_GREEN, COLOR_GREEN, 12));
+        row.addView(badge, new LinearLayout.LayoutParams(dp(24), dp(24)));
+
+        TextView lbl = tv(label, 16, COLOR_BLUE, true);
+        lbl.setPadding(dp(10), 0, 0, 0);
+        row.addView(lbl);
+        return row;
+    }
+
+    private View apBanner(String label) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(8), dp(10), dp(8));
+        row.setBackground(rounded(COLOR_WARN_BG, COLOR_WARN_BDR, 8));
+        row.setLayoutParams(matchWrap(0, 0, 0, dp(10)));
+
+        TextView lbl = tv(label, 14, Color.rgb(146, 64, 14), true);
+        row.addView(lbl);
+        return row;
+    }
+
+    private TextView tv(String text, float size, int color, boolean bold) {
         TextView v = new TextView(this);
-        v.setText("Passo " + number + " — " + label);
-        v.setTextSize(17);
-        v.setTextColor(COLOR_BLUE);
-        v.setTypeface(Typeface.DEFAULT_BOLD);
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.setMargins(0, 0, 0, dp(6));
-        v.setLayoutParams(p);
+        v.setText(text);
+        v.setTextSize(size);
+        v.setTextColor(color);
+        if (bold) v.setTypeface(Typeface.DEFAULT_BOLD);
         return v;
     }
 
-    private TextView sectionLabel(String label) {
-        TextView v = new TextView(this);
-        v.setText(label);
-        v.setTextSize(13);
-        v.setTextColor(COLOR_MUTED);
-        v.setTypeface(Typeface.DEFAULT_BOLD);
+    private TextView muted(String text) {
+        TextView v = tv(text, 13, COLOR_MUTED, false);
+        v.setLineSpacing(0, 1.15f);
+        v.setLayoutParams(matchWrap(0, 0, 0, dp(10)));
         return v;
     }
 
-    private TextView text(String value) {
-        TextView v = new TextView(this);
-        v.setText(value);
-        v.setTextSize(13);
-        v.setTextColor(COLOR_TEXT);
-        v.setLineSpacing(0, 1.1f);
-        v.setPadding(0, dp(2), 0, dp(2));
-        return v;
+    private TextView sectionLbl(String text) {
+        return tv(text, 12, COLOR_MUTED, true);
     }
 
-    private TextView muted(String value) {
-        TextView v = text(value);
-        v.setTextColor(COLOR_MUTED);
-        v.setPadding(0, dp(4), 0, dp(8));
-        return v;
-    }
-
-    private TextView statusChip(String value) {
-        TextView v = new TextView(this);
-        v.setText(value);
-        v.setTextSize(12);
-        v.setTextColor(COLOR_MUTED);
-        v.setTypeface(Typeface.DEFAULT_BOLD);
+    private TextView statusChip(String text) {
+        TextView v = tv(text, 12, COLOR_MUTED, false);
         v.setPadding(dp(10), dp(6), dp(10), dp(6));
         v.setBackground(rounded(COLOR_BG, COLOR_BORDER, 8));
         return v;
     }
 
-    private View successChip(String value) {
-        TextView v = new TextView(this);
-        v.setText(value);
-        v.setTextSize(13);
-        v.setTextColor(COLOR_GREEN);
-        v.setTypeface(Typeface.DEFAULT_BOLD);
+    private View successBadge(String text) {
+        TextView v = tv(text, 13, COLOR_GREEN, true);
         v.setPadding(dp(10), dp(8), dp(10), dp(8));
         v.setBackground(rounded(COLOR_SUCCESS, Color.rgb(134, 239, 172), 8));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.setMargins(0, dp(6), 0, 0);
-        v.setLayoutParams(p);
+        v.setLayoutParams(matchWrap(0, dp(4), 0, 0));
         return v;
     }
 
-    private void setStatusChip(TextView chip, String text, int color) {
+    private void setChip(TextView chip, String text, int color) {
         chip.setText(text);
         chip.setTextColor(color);
-        chip.setBackground(rounded(
-            color == COLOR_GREEN ? COLOR_SUCCESS : color == COLOR_BLUE ? Color.rgb(219, 234, 254) : COLOR_ERROR,
-            color == COLOR_GREEN ? Color.rgb(134, 239, 172) : color == COLOR_BLUE ? Color.rgb(147, 197, 253) : Color.rgb(252, 165, 165),
-            8));
+        int bg, border;
+        if (color == COLOR_GREEN) { bg = COLOR_SUCCESS; border = Color.rgb(134, 239, 172); }
+        else if (color == COLOR_BLUE_MED) { bg = Color.rgb(219, 234, 254); border = Color.rgb(147, 197, 253); }
+        else if (color == Color.rgb(185, 28, 28)) { bg = COLOR_ERROR; border = Color.rgb(252, 165, 165); }
+        else { bg = COLOR_BG; border = COLOR_BORDER; }
+        chip.setBackground(rounded(bg, border, 8));
     }
 
-    private EditText input(String hint, boolean password) {
+    private EditText input(String hint) {
         EditText e = new EditText(this);
         e.setHint(hint);
         e.setSingleLine(true);
-        e.setInputType(password
-            ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
-            : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
         e.setTextColor(COLOR_TEXT);
         e.setHintTextColor(Color.rgb(148, 163, 184));
         e.setTextSize(14);
@@ -1023,80 +1246,76 @@ public class MainActivity extends Activity {
         return e;
     }
 
-    private LinearLayout field(String label, EditText input) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.setMargins(0, dp(8), 0, 0);
-        box.setLayoutParams(p);
+    private EditText inputPass(String hint) {
+        EditText e = input(hint);
+        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        return e;
+    }
 
-        TextView lbl = new TextView(this);
-        lbl.setText(label);
-        lbl.setTextSize(11);
-        lbl.setTextColor(COLOR_MUTED);
-        lbl.setTypeface(Typeface.DEFAULT_BOLD);
+    private LinearLayout field(String label, EditText input) {
+        LinearLayout box = vStack();
+        box.setLayoutParams(matchWrap(0, dp(8), 0, 0));
+        TextView lbl = tv(label, 11, COLOR_MUTED, true);
         lbl.setPadding(0, 0, 0, dp(4));
         box.addView(lbl);
         box.addView(input, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
         return box;
     }
 
-    private Button button(String label, View.OnClickListener listener) {
+    private Button primaryBtn(String label, View.OnClickListener l) {
         Button b = new Button(this);
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextColor(COLOR_TEXT);
-        b.setTextSize(13);
-        b.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.START);
+        b.setText(label); b.setAllCaps(false);
+        b.setTextColor(Color.WHITE); b.setTextSize(14);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(16), dp(10), dp(16), dp(10));
+        b.setBackground(rounded(COLOR_GREEN, COLOR_GREEN, 10));
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    private Button secondaryBtn(String label, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(label); b.setAllCaps(false);
+        b.setTextColor(COLOR_BLUE_MED); b.setTextSize(13);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(14), dp(8), dp(14), dp(8));
+        b.setBackground(rounded(Color.rgb(219, 234, 254), Color.rgb(147, 197, 253), 10));
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    private Button listBtn(String label, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(label); b.setAllCaps(false);
+        b.setTextColor(COLOR_TEXT); b.setTextSize(13);
+        b.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
         b.setPadding(dp(12), dp(8), dp(12), dp(8));
         b.setBackground(rounded(Color.rgb(248, 250, 252), COLOR_BORDER, 10));
+        b.setLayoutParams(matchWrap(0, dp(4), 0, 0));
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    private View gap(View v, int topDp) {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.setMargins(0, dp(4), 0, 0);
-        b.setLayoutParams(p);
-        b.setOnClickListener(listener);
-        return b;
-    }
-
-    private Button primaryButton(String label, View.OnClickListener listener) {
-        Button b = button(label, listener);
-        b.setTextColor(Color.WHITE);
-        b.setGravity(android.view.Gravity.CENTER);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setBackground(rounded(COLOR_GREEN, COLOR_GREEN, 10));
-        return b;
-    }
-
-    private Button secondaryButton(String label, View.OnClickListener listener) {
-        Button b = button(label, listener);
-        b.setTextColor(COLOR_BLUE);
-        b.setGravity(android.view.Gravity.CENTER);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setBackground(rounded(Color.rgb(219, 234, 254), Color.rgb(147, 197, 253), 10));
-        return b;
-    }
-
-    private View spaced(View v) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.setMargins(0, dp(10), 0, 0);
+        p.topMargin = topDp;
         v.setLayoutParams(p);
         return v;
     }
 
-    private LinearLayout listBox() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(0, dp(4), 0, 0);
-        return box;
+    private LinearLayout.LayoutParams matchWrap(int l, int t, int r, int b) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(l, t, r, b);
+        return p;
     }
 
     private GradientDrawable rounded(int fill, int stroke, int radiusDp) {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(fill);
-        d.setCornerRadius(dp(radiusDp));
-        d.setStroke(dp(1), stroke);
+        d.setColor(fill); d.setCornerRadius(dp(radiusDp)); d.setStroke(dp(1), stroke);
         return d;
     }
 
@@ -1104,11 +1323,14 @@ public class MainActivity extends Activity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    private void appendCamera(String msg) { logCamera.addView(text(msg)); }
-    private void appendNetwork(String msg) { networkList.addView(text(msg)); }
-    private void appendApi(String msg) { if (apiList != null) apiList.addView(text(msg)); }
-
-    private void toast(String msg) {
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+    private void logBle(String msg) {
+        runOnUiThread(() -> {
+            if (logBle == null) return;
+            TextView v = tv(msg, 12, msg.startsWith("✓") ? COLOR_GREEN : msg.startsWith("✗") ? Color.rgb(185, 28, 28) : COLOR_MUTED, false);
+            v.setPadding(0, dp(2), 0, dp(2));
+            logBle.addView(v);
+        });
     }
+
+    private void toast(String msg) { Toast.makeText(this, msg, Toast.LENGTH_LONG).show(); }
 }
