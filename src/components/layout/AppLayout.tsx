@@ -13,7 +13,6 @@ import {
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/context/auth-context";
-import { Button } from "@/components/ui/button";
 
 const navItems = [
   { to: "/", label: "Monitoramento", icon: ShieldCheck, end: true },
@@ -28,19 +27,19 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const navigate = useNavigate();
 
   return (
-    <div className="flex h-full flex-col bg-sidebar">
+    <div className="sidebar-root flex h-full flex-col">
       {/* Logo */}
-      <div className="flex items-center gap-3 px-5 py-5 border-b border-sidebar-border">
-        <div className="h-10 w-10 rounded-lg bg-primary flex items-center justify-center shrink-0">
-          <ShieldCheck className="h-5 w-5 text-primary-foreground" strokeWidth={2.2} />
+      <div className="flex items-center gap-3 px-4 py-4 border-b border-white/10">
+        <div className="sidebar-logo-icon">
+          <ShieldCheck className="h-5 w-5 text-white" strokeWidth={2.2} />
         </div>
         <div className="leading-tight min-w-0">
-          <div className="font-bold text-base text-sidebar-foreground tracking-wide truncate">VigiaEscolar</div>
-          <div className="text-[10px] tracking-widest text-sidebar-foreground/50 uppercase">Segurança Escolar</div>
+          <div className="font-bold text-[15px] text-white tracking-wide truncate">VigiaEscolar</div>
+          <div className="text-[9px] tracking-widest text-white/40 uppercase">Segurança Escolar</div>
         </div>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-2 py-3 space-y-0.5">
+      <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
@@ -49,58 +48,50 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             onClick={onNavigate}
             className={({ isActive }) =>
               cn(
-                "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
-                "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
-                isActive &&
-                  "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground font-semibold",
-                item.highlight && !isActive && "text-sidebar-foreground font-semibold",
+                "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-all duration-150",
+                isActive
+                  ? "sidebar-nav-active text-white shadow-md"
+                  : "text-white/60 hover:text-white hover:bg-white/[0.08]",
               )
             }
           >
             {({ isActive }) => (
               <>
-                <item.icon className="h-4 w-4 shrink-0" />
+                <item.icon className={cn("h-4 w-4 shrink-0 transition-transform", isActive && "scale-110")} />
                 <span className="flex-1 truncate">{item.label}</span>
-                {item.highlight && !isActive && (
-                  <span className="h-2 w-2 rounded-full bg-destructive pulse-dot text-destructive" />
-                )}
-                {isActive && <ChevronRight className="h-3.5 w-3.5 opacity-70" />}
+                {isActive && <ChevronRight className="h-3.5 w-3.5 opacity-60" />}
               </>
             )}
           </NavLink>
         ))}
       </nav>
 
-      <div className="border-t border-sidebar-border p-3">
-        <div className="rounded-lg bg-sidebar-accent p-3 text-xs">
-          <div className="flex items-center gap-2 text-primary font-semibold">
-            <span className="h-2 w-2 rounded-full bg-primary" />
+      <div className="border-t border-white/10 p-3">
+        <div className="rounded-lg bg-white/[0.08] p-3 text-xs space-y-2">
+          <div className="flex items-center gap-2 text-emerald-400 font-semibold">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
             Conectado
           </div>
-          <div className="mt-1 text-sidebar-foreground/60 truncate">
+          <div className="text-white/50 truncate text-[11px]">
             {user?.tenantNome || user?.nome || "Conta autenticada"}
           </div>
-          <div className="mt-3 flex items-center justify-between gap-2">
-            <span className="text-[11px] uppercase tracking-wider text-sidebar-foreground/40">
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <span className="text-[10px] uppercase tracking-wider text-white/30">
               {user?.role || "admin"}
             </span>
-            <Button
+            <button
               type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 border-sidebar-border bg-sidebar text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground text-xs"
               onClick={async () => {
-                try {
-                  await signOut();
-                } finally {
+                try { await signOut(); } finally {
                   navigate("/login", { replace: true });
                   onNavigate?.();
                 }
               }}
+              className="flex items-center gap-1 text-[11px] text-white/40 hover:text-white/80 transition-colors"
             >
-              <LogOut className="h-3 w-3 mr-1" />
+              <LogOut className="h-3 w-3" />
               Sair
-            </Button>
+            </button>
           </div>
         </div>
       </div>
@@ -113,23 +104,31 @@ function pageTitle(pathname: string) {
   return item?.label ?? "Monitoramento";
 }
 
+function pageIcon(pathname: string) {
+  const item = navItems.find((i) => (i.end ? pathname === i.to : pathname.startsWith(i.to) && i.to !== "/"));
+  return item?.icon ?? ShieldCheck;
+}
+
 export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
   const { user } = useAuth();
+  const PageIcon = pageIcon(location.pathname);
 
   return (
     <div className="min-h-screen w-full flex bg-background">
       {/* Sidebar desktop */}
-      <aside className="hidden lg:flex w-60 shrink-0 border-r border-sidebar-border">
-        <SidebarContent />
+      <aside className="hidden lg:flex w-56 shrink-0 sidebar-desktop">
+        <div className="w-full">
+          <SidebarContent />
+        </div>
       </aside>
 
-      {/* Sidebar mobile */}
+      {/* Sidebar mobile overlay */}
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute left-0 top-0 h-full w-64 border-r border-sidebar-border">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setMobileOpen(false)} />
+          <aside className="absolute left-0 top-0 h-full w-56 sidebar-mobile">
             <SidebarContent onNavigate={() => setMobileOpen(false)} />
           </aside>
         </div>
@@ -137,40 +136,48 @@ export default function AppLayout() {
 
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
-        <header className="sticky top-0 z-40 flex items-center gap-3 h-14 px-4 lg:px-6 border-b border-border bg-white shadow-sm">
+        <header className="sticky top-0 z-40 flex items-center gap-3 h-13 px-4 lg:px-5 border-b border-border/60 bg-white/95 backdrop-blur-sm shadow-sm">
           <button
             type="button"
-            className="lg:hidden p-2 -ml-2 rounded-md hover:bg-muted text-foreground"
+            className="lg:hidden p-1.5 -ml-1 rounded-md hover:bg-muted text-foreground"
             onClick={() => setMobileOpen(true)}
           >
             {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
 
-          <div className="flex items-center gap-2 text-sm">
-            <Link to="/" className="font-semibold text-secondary hover:text-primary transition-colors">
+          <div className="flex items-center gap-2 text-sm min-w-0">
+            <Link to="/" className="font-semibold text-secondary hover:text-primary transition-colors shrink-0">
               VigiaEscolar
             </Link>
-            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-            <span className="font-medium text-foreground">
+            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
+            <div className="flex items-center gap-1.5 text-foreground font-semibold truncate">
+              <PageIcon className="h-3.5 w-3.5 text-primary shrink-0" />
               {pageTitle(location.pathname)}
-            </span>
+            </div>
           </div>
 
-          <div className="ml-auto flex items-center gap-4 text-sm">
-            <span className="hidden sm:flex items-center gap-1.5 text-success font-medium">
-              <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse-soft" />
+          <div className="ml-auto flex items-center gap-3 text-sm shrink-0">
+            <span className="hidden sm:flex items-center gap-1.5 font-medium text-emerald-600 text-xs">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
               Online
             </span>
-            <span className="hidden md:inline text-muted-foreground">
-              {user?.tenantNome || user?.nome || ""}
-            </span>
-            <span className="text-muted-foreground text-xs">
-              {new Date().toLocaleDateString("pt-BR")}
-            </span>
+            <div className="hidden md:flex items-center gap-2 pl-3 border-l border-border/60">
+              <div className="header-avatar">
+                {(user?.tenantNome || user?.nome || "U").charAt(0).toUpperCase()}
+              </div>
+              <div className="leading-tight">
+                <div className="text-[12px] font-semibold text-foreground truncate max-w-[120px]">
+                  {user?.tenantNome || user?.nome || ""}
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  {new Date().toLocaleDateString("pt-BR")}
+                </div>
+              </div>
+            </div>
           </div>
         </header>
 
-        <main className="flex-1 p-4 lg:p-6 animate-fade-in">
+        <main className="flex-1 p-4 lg:p-5 animate-fade-in">
           <Outlet />
         </main>
       </div>

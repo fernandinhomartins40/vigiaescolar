@@ -9,69 +9,63 @@
 
 @layer base {
   :root {
-    /* Fundo branco/neve */
-    --background: 210 20% 98%;
-    --foreground: 214 32% 16%;
+    /* Fundo levemente azulado — não cinza morto */
+    --background: 214 30% 96%;
+    --foreground: 214 40% 14%;
 
-    /* Cards brancos com borda sutil */
     --card: 0 0% 100%;
-    --card-foreground: 214 32% 16%;
+    --card-foreground: 214 40% 14%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 214 32% 16%;
+    --popover-foreground: 214 40% 14%;
 
-    /* Verde institucional #008a3b */
+    /* Verde institucional #008a3b — mais saturado */
     --primary: 145 100% 27%;
     --primary-foreground: 0 0% 100%;
 
     /* Azul escuro #12355a */
-    --secondary: 210 62% 22%;
+    --secondary: 210 66% 22%;
     --secondary-foreground: 0 0% 100%;
 
-    --muted: 210 16% 93%;
-    --muted-foreground: 215 16% 47%;
+    --muted: 214 20% 91%;
+    --muted-foreground: 215 18% 44%;
 
-    /* Azul médio #0067b0 para accent */
+    /* Azul médio #0067b0 */
     --accent: 207 100% 35%;
     --accent-foreground: 0 0% 100%;
 
-    /* Alerta/perigo */
-    --destructive: 0 72% 51%;
+    --destructive: 0 76% 50%;
     --destructive-foreground: 0 0% 100%;
 
-    /* Aviso âmbar */
-    --warning: 38 92% 50%;
-    --warning-foreground: 214 32% 16%;
+    --warning: 38 96% 48%;
+    --warning-foreground: 214 40% 14%;
 
-    /* Sucesso verde institucional */
     --success: 145 100% 27%;
     --success-foreground: 0 0% 100%;
 
-    /* Bordas neutras */
-    --border: 214 20% 88%;
-    --input: 214 20% 92%;
+    --border: 214 22% 86%;
+    --input: 214 22% 90%;
     --ring: 145 100% 27%;
 
     --radius: 0.5rem;
 
-    /* Sidebar azul escuro institucional */
-    --sidebar-background: 210 62% 22%;
-    --sidebar-foreground: 210 40% 92%;
-    --sidebar-primary: 145 100% 27%;
+    /* Sidebar: gradiente azul profundo */
+    --sidebar-background: 213 68% 17%;
+    --sidebar-foreground: 210 50% 92%;
+    --sidebar-primary: 145 100% 35%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 210 55% 28%;
+    --sidebar-accent: 213 60% 24%;
     --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 210 50% 30%;
-    --sidebar-ring: 145 100% 27%;
+    --sidebar-border: 213 55% 26%;
+    --sidebar-ring: 145 100% 35%;
 
-    /* Sombras institucionais */
-    --shadow-card: 0 1px 3px hsl(214 32% 16% / 0.08), 0 1px 2px hsl(214 32% 16% / 0.04);
-    --shadow-elevated: 0 4px 12px hsl(214 32% 16% / 0.10), 0 2px 4px hsl(214 32% 16% / 0.06);
+    --shadow-card: 0 1px 4px hsl(214 40% 14% / 0.07), 0 1px 2px hsl(214 40% 14% / 0.04);
+    --shadow-elevated: 0 6px 20px hsl(214 40% 14% / 0.10), 0 2px 6px hsl(214 40% 14% / 0.06);
+    --shadow-sidebar: 4px 0 24px hsl(213 68% 10% / 0.25);
 
-    /* Gradientes institucionais */
-    --gradient-primary: linear-gradient(135deg, hsl(145 100% 27%), hsl(145 85% 22%));
-    --gradient-header: linear-gradient(180deg, hsl(210 62% 22%), hsl(210 62% 18%));
-    --gradient-card: linear-gradient(180deg, hsl(0 0% 100%), hsl(210 16% 98%));
+    --gradient-primary: linear-gradient(135deg, hsl(145 100% 27%), hsl(160 90% 22%));
+    --gradient-header: linear-gradient(180deg, hsl(213 68% 17%), hsl(213 68% 13%));
+    --gradient-active: linear-gradient(135deg, hsl(145 100% 28%), hsl(145 90% 22%));
   }
 }
 
@@ -86,7 +80,7 @@
 
   body {
     @apply bg-background text-foreground font-sans antialiased;
-    background-color: hsl(210 16% 96%);
+    background-color: hsl(214 30% 96%);
   }
 
   h1, h2, h3, h4, h5, h6, .font-display {
@@ -170,5 +164,29 @@
   }
   .progress-institutional > div {
     @apply h-full rounded-full bg-primary transition-all;
+  }
+
+  /* Layout — sidebar */
+  .sidebar-root {
+    background: linear-gradient(180deg, hsl(213 68% 17%), hsl(213 72% 13%));
+  }
+  .sidebar-logo-icon {
+    background: linear-gradient(135deg, hsl(145 100% 30%), hsl(145 90% 22%));
+    @apply h-9 w-9 rounded-lg flex items-center justify-center shrink-0 shadow-lg;
+  }
+  .sidebar-nav-active {
+    background: linear-gradient(135deg, hsl(145 100% 28%), hsl(145 88% 21%));
+  }
+  .sidebar-desktop {
+    box-shadow: 4px 0 24px hsl(213 68% 10% / 0.18);
+  }
+  .sidebar-mobile {
+    box-shadow: 4px 0 32px hsl(213 68% 10% / 0.4);
+  }
+
+  /* Layout — header avatar */
+  .header-avatar {
+    background: linear-gradient(135deg, hsl(210 66% 22%), hsl(207 100% 35%));
+    @apply h-7 w-7 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0;
   }
 }
