@@ -53,6 +53,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -534,25 +537,24 @@ public class MainActivity extends Activity {
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                // status 133 = GATT_ERROR (timeout/advertising stop), 8 = link loss
                 int s = status;
-                runOnUiThread(() -> logBle("Erro de conexão BLE (status=" + s + "). Tente novamente."));
+                String hint = s == 133 ? " (câmera saiu do modo BLE — reinicie-a)" : s == 8 ? " (sinal perdido)" : "";
+                runOnUiThread(() -> {
+                    logBle("✗ Erro de conexão BLE status=" + s + hint);
+                    setChip(statusBle, "Erro " + s + hint, Color.rgb(185, 28, 28));
+                });
                 try { gatt.close(); } catch (Exception ignored) {}
                 if (bleGatt == gatt) bleGatt = null;
                 bleConnected = false;
-                runOnUiThread(() -> setChip(statusBle, "Erro (status " + s + ")", Color.rgb(185, 28, 28)));
                 return;
             }
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                runOnUiThread(() -> logBle("BLE conectado. Descobrindo serviços..."));
-                // Delay de 600ms antes de discoverServices — necessário em muitos dispositivos Android
-                mainHandler.postDelayed(() -> {
-                    if (bleGatt == gatt) {
-                        try { gatt.discoverServices(); } catch (Exception e) {
-                            logBle("Erro ao descobrir serviços: " + e.getMessage());
-                        }
-                    }
-                }, 600);
+                runOnUiThread(() -> logBle("BLE conectado. Solicitando MTU 512..."));
+                // Passo 1: requestMtu ANTES de discoverServices (exigido pelo SDK XM)
+                try { gatt.requestMtu(512); } catch (Exception e) {
+                    // Fallback: segue sem MTU negociado
+                    mainHandler.postDelayed(() -> { if (bleGatt == gatt) gatt.discoverServices(); }, 500);
+                }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 bleConnected = false;
                 runOnUiThread(() -> {
@@ -566,92 +568,124 @@ public class MainActivity extends Activity {
 
         @SuppressLint("MissingPermission")
         @Override
+        public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
+            runOnUiThread(() -> logBle("MTU negociado: " + mtu + " (status=" + status + "). Descobrindo serviços..."));
+            // Passo 2: discoverServices após MTU
+            mainHandler.postDelayed(() -> {
+                if (bleGatt == gatt) {
+                    try { gatt.discoverServices(); } catch (Exception e) {
+                        runOnUiThread(() -> logBle("✗ Erro discoverServices: " + e.getMessage()));
+                    }
+                }
+            }, 300);
+        }
+
+        @SuppressLint("MissingPermission")
+        @Override
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                runOnUiThread(() -> logBle("Falha ao descobrir serviços (status " + status + ")"));
+                runOnUiThread(() -> logBle("✗ Falha ao descobrir serviços (status " + status + ")"));
                 return;
             }
 
             BluetoothGattService svc = gatt.getService(UUID_SERVICE);
             if (svc == null) {
-                // Lista todos os services encontrados para diagnóstico
-                StringBuilder sb = new StringBuilder("Services encontrados:");
+                StringBuilder sb = new StringBuilder();
                 for (BluetoothGattService s : gatt.getServices()) sb.append("\n  ").append(s.getUuid());
-                runOnUiThread(() -> logBle("Serviço XM (0x1910) não encontrado.\n" + sb));
+                runOnUiThread(() -> logBle("✗ Serviço XM (0x1910) não encontrado. Services:" + sb));
                 return;
             }
 
-            runOnUiThread(() -> logBle("Serviço XM encontrado. Habilitando notificações..."));
+            runOnUiThread(() -> logBle("Serviço XM 0x1910 encontrado. Habilitando notificações..."));
             bleConnected = true;
 
+            // Passo 3: habilitar notify em 0x2b11
             BluetoothGattCharacteristic notifyChar = svc.getCharacteristic(UUID_NOTIFY);
             if (notifyChar == null) {
-                runOnUiThread(() -> logBle("Characteristic de notificação (0x2b11) não encontrada."));
+                runOnUiThread(() -> logBle("✗ Characteristic notify 0x2b11 não encontrada."));
                 return;
             }
-            gatt.setCharacteristicNotification(notifyChar, true);
+            boolean ok = gatt.setCharacteristicNotification(notifyChar, true);
+            runOnUiThread(() -> logBle("setCharacteristicNotification: " + ok));
+
             BluetoothGattDescriptor desc = notifyChar.getDescriptor(UUID_CCCD);
-            if (desc != null) {
-                // API 33+ usa writeDescriptor(desc, value); versões anteriores usam setValue + writeDescriptor
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                } else {
-                    desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                    gatt.writeDescriptor(desc);
-                }
+            if (desc == null) {
+                runOnUiThread(() -> logBle("CCCD não encontrado — aguardando frame da câmera..."));
+                // A câmera envia DEV_INFO primeiro; aguardamos via onCharacteristicChanged
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
             } else {
-                // CCCD não encontrado — tenta enviar auth mesmo assim
-                runOnUiThread(() -> logBle("CCCD não encontrado, enviando auth diretamente..."));
-                mainHandler.postDelayed(() -> sendAuthFrame(gatt), 200);
+                desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                gatt.writeDescriptor(desc);
             }
         }
 
         @SuppressLint("MissingPermission")
         @Override
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                runOnUiThread(() -> logBle("Aviso: CCCD write status=" + status + ", continuando mesmo assim..."));
-            } else {
-                runOnUiThread(() -> logBle("Notificações habilitadas."));
-            }
-            mainHandler.postDelayed(() -> sendAuthFrame(gatt), 200);
+            runOnUiThread(() -> logBle("CCCD write status=" + status + ". Aguardando DEV_INFO da câmera..."));
+            // NÃO enviamos auth aqui. O protocolo XM exige aguardar o DEV_INFO que a câmera
+            // envia por conta própria após notify habilitado. Timeout de 5s como fallback.
+            mainHandler.postDelayed(() -> {
+                if (bleConnected && connectedDevSn == null && bleGatt == gatt) {
+                    runOnUiThread(() -> logBle("Timeout aguardando DEV_INFO — tentando auth com SN vazio..."));
+                    sendAuthFrame(gatt);
+                }
+            }, 5_000);
         }
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
             if (!UUID_NOTIFY.equals(characteristic.getUuid())) return;
-            // getValue() deprecated em API 33+; usa o overload com value param se disponível
             byte[] data = characteristic.getValue();
-            if (data == null || data.length < 5) return;
+            if (data == null || data.length < 2) return;
             processIncoming(gatt, data);
         }
 
-        // API 33+: overload com value diretamente
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, byte[] value) {
             if (!UUID_NOTIFY.equals(characteristic.getUuid())) return;
-            if (value == null || value.length < 5) return;
+            if (value == null || value.length < 2) return;
             processIncoming(gatt, value);
         }
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                runOnUiThread(() -> logBle("Falha ao escrever no BLE (status " + status + ")"));
+                runOnUiThread(() -> logBle("✗ Falha ao escrever BLE (status " + status + ")"));
             }
         }
     };
 
     private void processIncoming(BluetoothGatt gatt, byte[] data) {
+        // Log raw hex para diagnóstico
+        StringBuilder hex = new StringBuilder();
+        int show = Math.min(data.length, 16);
+        for (int i = 0; i < show; i++) hex.append(String.format("%02X ", data[i]));
+        String hexStr = hex.toString().trim() + (data.length > 16 ? "..." : "");
+        runOnUiThread(() -> logBle("← BLE [" + data.length + "b] " + hexStr));
+
+        if (data.length < 2) return;
         byte funId = data[1];
+
         runOnUiThread(() -> {
-            logBle("← BLE recv funId=0x" + String.format("%02X", funId) + " len=" + data.length);
             if (funId == FUN_AUTH_RSP) {
                 handleAuthResponse(gatt, data);
             } else if (funId == FUN_WIFI_RSP) {
                 handleWifiResponse(data);
             } else if (funId == FUN_DEV_INFO) {
-                handleDevInfo(data);
+                handleDevInfo(gatt, data);
+            } else {
+                // Frame desconhecido — pode ser DEV_INFO com funId diferente neste firmware
+                // Tenta extrair string JSON do payload para diagnóstico
+                if (data.length > 5) {
+                    try {
+                        String raw = new String(data, 5, data.length - 5, StandardCharsets.UTF_8).trim();
+                        if (!raw.isEmpty()) logBle("  payload: " + raw.substring(0, Math.min(raw.length(), 120)));
+                    } catch (Exception ignored) {}
+                }
             }
         });
     }
@@ -660,42 +694,60 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void sendAuthFrame(BluetoothGatt gatt) {
-        String pass = cameraPassInput.getText().toString().trim();
-        // DevSN inicialmente desconhecido — usamos string vazia; a câmera responde com DEV_INFO
+        String pass  = cameraPassInput.getText().toString().trim();
         String devSn = connectedDevSn != null ? connectedDevSn : "";
-        String token = bleToken(devSn, pass);
+
+        // Token: AES-CBC-128-PKCS7(key=MD5(sn)[0:16], iv=zeros, plain=pass+random4hex)
+        // Se SN desconhecido, usa key derivada de string vazia (câmera aceita para autenticação inicial)
+        String token = encBleToken(devSn, pass);
         byte[] payload = token.getBytes(StandardCharsets.UTF_8);
         byte[] frame   = buildBleFrame(FUN_AUTH_REQ, payload);
 
+        logBle("→ AUTH token=" + token.substring(0, Math.min(token.length(), 16)) + "... SN=" + (devSn.isEmpty() ? "(aguardando)" : devSn));
         writeBluetoothChar(gatt, frame);
-        logBle("Token de autenticação enviado...");
     }
 
     private void handleAuthResponse(BluetoothGatt gatt, byte[] data) {
-        // data[5..] = payload da resposta
-        // Byte 5 = código: 0x00 = ok, qualquer outro = falha
+        // Byte 5 = resultado: 0x00 = ok
         boolean ok = data.length >= 6 && data[5] == 0x00;
         if (ok) {
-            logBle("✓ Autenticação BLE bem-sucedida. Enviando Wi-Fi...");
+            logBle("✓ Auth aceito. Enviando configuração Wi-Fi...");
             sendWifiFrame(gatt);
         } else {
-            // Pode ser que o devSN veio na resposta (alguns firmwares enviam antes do auth)
-            // Tenta re-autenticar com senha vazia
-            logBle("Auth falhou (ret=" + (data.length >= 6 ? data[5] : -1) + "). Tentando sem senha...");
-            cameraPassInput.setText("");
-            sendAuthFrame(gatt);
+            int ret = data.length >= 6 ? (data[5] & 0xFF) : -1;
+            logBle("✗ Auth recusado (ret=0x" + String.format("%02X", ret) + ")");
+            if (ret == 0x01) logBle("  → Senha da câmera incorreta");
+            else if (ret == 0x02) logBle("  → SN inválido");
+            else logBle("  → Verifique a senha da câmera no campo 'Senha da câmera XM'");
         }
     }
 
-    private void handleDevInfo(byte[] data) {
-        // Extrai devSN do payload (string UTF-8 nos bytes 5..)
+    private void handleDevInfo(BluetoothGatt gatt, byte[] data) {
+        // A câmera envia seu SN após notify habilitado
+        // Payload (bytes 5+): JSON ou string com o SN
         if (data.length > 5) {
-            String info = new String(data, 5, data.length - 5, StandardCharsets.UTF_8).trim();
-            if (!info.isEmpty()) {
-                connectedDevSn = info.split("[,;|]")[0].trim();
-                logBle("Serial da câmera: " + connectedDevSn);
+            try {
+                String raw = new String(data, 5, data.length - 5, StandardCharsets.UTF_8).trim();
+                logBle("DEV_INFO payload: " + raw.substring(0, Math.min(raw.length(), 100)));
+                // Tenta extrair SN de JSON {"SN":"...","..."}
+                if (raw.startsWith("{")) {
+                    JSONObject obj = new JSONObject(raw);
+                    String sn = obj.optString("SN", obj.optString("sn", obj.optString("SerialNo", "")));
+                    if (!sn.isEmpty()) connectedDevSn = sn;
+                } else {
+                    // Formato simples: SN direto ou "SN,modelo,..."
+                    connectedDevSn = raw.split("[,;|\\s]")[0].trim();
+                }
+                if (connectedDevSn != null && !connectedDevSn.isEmpty()) {
+                    logBle("Serial da câmera: " + connectedDevSn);
+                }
+            } catch (Exception e) {
+                logBle("DEV_INFO parse error: " + e.getMessage());
             }
         }
+        // Agora que temos o SN, envia auth
+        mainHandler.removeCallbacksAndMessages(null); // cancela timeout
+        sendAuthFrame(gatt);
     }
 
     @SuppressLint("MissingPermission")
@@ -704,32 +756,38 @@ public class MainActivity extends Activity {
         String wifiPass = wifiPassInput.getText().toString().trim();
 
         if (ssid.isEmpty()) {
-            logBle("Informe o SSID da rede Wi-Fi (Passo 2) antes de configurar.");
+            logBle("✗ Informe o SSID (Passo 2) antes de configurar.");
             return;
         }
 
-        String auth    = wifiPass.isEmpty() ? "OPEN" : "WPA2";
-        String encType = wifiPass.isEmpty() ? "NONE" : "AES";
+        // Valores exatos confirmados pela análise do APK original (SDK_NetWifiConfig)
+        String encrypType = wifiPass.isEmpty() ? "OPEN"    : "WPA2PSK";
+        String keyType    = wifiPass.isEmpty() ? "NONE"    : "AES";
+        String auth       = wifiPass.isEmpty() ? "OPEN"    : "WPA2PSK";
 
         try {
             JSONObject wifi = new JSONObject();
             wifi.put("SSID",       ssid);
             wifi.put("Keys",       wifiPass);
-            wifi.put("NetType",    "0");          // 0 = DHCP
-            wifi.put("EncrypType", encType);
+            wifi.put("NetType",    "DHCP");
+            wifi.put("EncrypType", encrypType);
+            wifi.put("KeyType",    keyType);
             wifi.put("Auth",       auth);
             wifi.put("Enable",     true);
-            wifi.put("KeyType",    "");
             wifi.put("HostIP",     "0.0.0.0");
             wifi.put("GateWay",    "0.0.0.0");
             wifi.put("Submask",    "255.255.255.0");
 
-            byte[] payload = wifi.toString().getBytes(StandardCharsets.UTF_8);
+            // Wrapper com chave "NetWork.Wifi" como o SDK original usa
+            JSONObject wrapper = new JSONObject();
+            wrapper.put("NetWork.Wifi", wifi);
+
+            byte[] payload = wrapper.toString().getBytes(StandardCharsets.UTF_8);
             byte[] frame   = buildBleFrame(FUN_WIFI_CFG, payload);
             writeBluetoothChar(gatt, frame);
-            logBle("Configuração Wi-Fi enviada: " + ssid);
+            logBle("→ WiFi cfg enviado: SSID=" + ssid + " enc=" + encrypType);
         } catch (Exception e) {
-            logBle("Erro ao montar frame WiFi: " + e.getMessage());
+            logBle("✗ Erro ao montar frame WiFi: " + e.getMessage());
         }
     }
 
@@ -738,20 +796,77 @@ public class MainActivity extends Activity {
         if (ok) {
             logBle("✓ Câmera aceitou a rede Wi-Fi! Aguarde ela conectar (LED fixo).");
             setChip(statusBle, "Wi-Fi configurado ✓", COLOR_GREEN);
-            disconnectBle();
+            mainHandler.postDelayed(this::disconnectBle, 1000);
             toast("Câmera configurada! Aguarde conectar ao Wi-Fi da escola.");
         } else {
-            logBle("Câmera recusou a configuração Wi-Fi (ret=" + (data.length >= 6 ? data[5] : -1) + "). Verifique SSID e senha.");
+            int ret = data.length >= 6 ? (data[5] & 0xFF) : -1;
+            logBle("✗ Câmera recusou WiFi (ret=0x" + String.format("%02X", ret) + "). Verifique SSID/senha.");
             setChip(statusBle, "Falha Wi-Fi", Color.rgb(185, 28, 28));
         }
     }
 
     /**
-     * Monta frame BLE XM:
-     * [HEAD:1B=0xAB] [FUN_ID:1B] [LEN:2B LE] [CHECKSUM:1B] [DATA:N bytes]
-     * CHECKSUM = soma de todos os bytes do DATA mod 256
+     * Token de autenticação BLE XM — replica Fun_EncBleToken do libFunSDK.so:
+     *  key  = MD5(sn)[0..15]  (16 bytes, SN como string UTF-8)
+     *  iv   = zeros (16 bytes)
+     *  plain = password + randomHex4  (padded PKCS7 para múltiplo de 16)
+     * Retorna hex string uppercase do ciphertext
+     * Se SN vazio, usa chave derivada da SDK key "alexa20211018"
+     */
+    private String encBleToken(String sn, String password) {
+        try {
+            // Deriva chave AES: MD5 do SN (16 bytes)
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            String keySource = sn.isEmpty() ? "alexa20211018" : sn;
+            byte[] aesKey = md.digest(keySource.getBytes(StandardCharsets.UTF_8)); // 16 bytes
+
+            // Plaintext: password + salt aleatório de 4 hex chars
+            String salt = String.format(Locale.US, "%04X", new Random().nextInt(0x10000));
+            String plain = password + salt;
+
+            // Encrypt AES-CBC-128-PKCS7
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
+            IvParameterSpec ivSpec = new IvParameterSpec(new byte[16]);
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, keySpec, ivSpec);
+            byte[] encrypted = cipher.doFinal(plain.getBytes(StandardCharsets.UTF_8));
+
+            // Converte para hex uppercase
+            StringBuilder sb = new StringBuilder();
+            for (byte b : encrypted) sb.append(String.format("%02X", b));
+            return sb.toString();
+        } catch (Exception e) {
+            logBle("✗ Erro ao gerar token: " + e.getMessage());
+            // Fallback: token vazio (câmera de fábrica pode aceitar)
+            return "";
+        }
+    }
+
+    /**
+     * Frame BLE XM: [HEAD=0xAB][VERSION=0x00][FUN_ID_LO][FUN_ID_HI][LEN_LO][LEN_HI][CHECKSUM][DATA]
+     * Estrutura revelada pela análise do APK — 7 bytes de header, não 5.
+     * CHECKSUM = XOR de todos os bytes de HEAD até LEN (inclusive).
      */
     private byte[] buildBleFrame(byte funId, byte[] data) {
+        int dataLen = data != null ? data.length : 0;
+        byte[] frame = new byte[7 + dataLen];
+        frame[0] = BLE_HEAD;      // 0xAB
+        frame[1] = 0x00;          // VERSION
+        frame[2] = funId;         // FUN_ID_LO (16-bit, byte baixo)
+        frame[3] = 0x00;          // FUN_ID_HI
+        frame[4] = (byte) (dataLen & 0xFF);         // LEN_LO
+        frame[5] = (byte) ((dataLen >> 8) & 0xFF);  // LEN_HI
+        // CHECKSUM = XOR dos primeiros 6 bytes do header
+        byte cs = 0;
+        for (int i = 0; i < 6; i++) cs ^= frame[i];
+        frame[6] = cs;
+        if (data != null) System.arraycopy(data, 0, frame, 7, dataLen);
+        return frame;
+    }
+
+    // Mantido para compatibilidade com código de fallback DVRIP
+    @SuppressWarnings("unused")
+    private byte[] buildBleFrameOld(byte funId, byte[] data) {
         int dataLen = data != null ? data.length : 0;
         byte[] frame = new byte[5 + dataLen];
         frame[0] = BLE_HEAD;
@@ -765,24 +880,6 @@ public class MainActivity extends Activity {
         }
         frame[4] = (byte) checksum;
         return frame;
-    }
-
-    /**
-     * Token de autenticação BLE:
-     * MD5(devSN + password + randomHex4)[0..15] uppercase
-     * Se devSN vazio (ainda não conhecido), usa só MD5(password + salt)
-     */
-    private String bleToken(String devSn, String password) {
-        try {
-            Random rnd = new Random();
-            String salt = String.format(Locale.US, "%04X", rnd.nextInt(0x10000));
-            String input = devSn + password + salt;
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) sb.append(String.format("%02X", b));
-            return sb.toString(); // 32 chars uppercase hex
-        } catch (Exception e) { return "00000000000000000000000000000000"; }
     }
 
     @SuppressLint("MissingPermission")
