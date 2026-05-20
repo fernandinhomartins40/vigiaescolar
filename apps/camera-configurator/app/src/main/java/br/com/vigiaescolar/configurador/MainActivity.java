@@ -139,6 +139,10 @@ public class MainActivity extends Activity {
     private static final int COLOR_WARN_BG  = Color.rgb(255, 251, 235);
     private static final int COLOR_WARN_BDR = Color.rgb(253, 230, 138);
 
+    // ─── Log buffer (debug) ───────────────────────────────────────────────────
+    private final List<String> logBuffer = new ArrayList<>();
+    private ScrollView logScrollView;
+
     // ─── Estado BLE ───────────────────────────────────────────────────────────
     private BluetoothLeScanner bleScanner;
     private BluetoothGatt      bleGatt;
@@ -270,9 +274,61 @@ public class MainActivity extends Activity {
         configCard.addView(stepRow("3", "Configurar câmera via Bluetooth"));
         configCard.addView(muted("Selecione a câmera encontrada no Passo 1 e toque em configurar. O app enviará o Wi-Fi da escola diretamente para a câmera via BLE."));
         cameraPassInput = inputPass("Senha da câmera (padrão: vazio)");
-        logBle = vStack();
         configCard.addView(field("Senha da câmera XM", cameraPassInput));
-        configCard.addView(gap(logBle, dp(6)));
+
+        // Painel de log com scroll + botão copiar
+        LinearLayout logHeader = new LinearLayout(this);
+        logHeader.setOrientation(LinearLayout.HORIZONTAL);
+        logHeader.setGravity(Gravity.CENTER_VERTICAL);
+        logHeader.setLayoutParams(matchWrap(0, dp(10), 0, dp(4)));
+
+        TextView logTitle = tv("Log de diagnóstico", 11, COLOR_MUTED, true);
+        logTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        logHeader.addView(logTitle);
+
+        Button copyBtn = new Button(this);
+        copyBtn.setText("Copiar logs");
+        copyBtn.setAllCaps(false);
+        copyBtn.setTextSize(11);
+        copyBtn.setTextColor(COLOR_BLUE_MED);
+        copyBtn.setTypeface(Typeface.DEFAULT_BOLD);
+        copyBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
+        copyBtn.setBackground(rounded(Color.rgb(219, 234, 254), Color.rgb(147, 197, 253), 8));
+        copyBtn.setOnClickListener(v -> copyLogsToClipboard());
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        logHeader.addView(copyBtn, copyParams);
+
+        Button clearBtn = new Button(this);
+        clearBtn.setText("Limpar");
+        clearBtn.setAllCaps(false);
+        clearBtn.setTextSize(11);
+        clearBtn.setTextColor(COLOR_MUTED);
+        clearBtn.setPadding(dp(8), dp(4), dp(8), dp(4));
+        clearBtn.setBackground(rounded(COLOR_BG, COLOR_BORDER, 8));
+        clearBtn.setOnClickListener(v -> clearLogs());
+        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clearParams.leftMargin = dp(6);
+        logHeader.addView(clearBtn, clearParams);
+
+        configCard.addView(logHeader);
+
+        logScrollView = new ScrollView(this);
+        logScrollView.setBackgroundColor(Color.rgb(15, 23, 42));
+        GradientDrawable logBg = new GradientDrawable();
+        logBg.setColor(Color.rgb(15, 23, 42));
+        logBg.setCornerRadius(dp(8));
+        logScrollView.setBackground(logBg);
+        logScrollView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout.LayoutParams scrollParams = matchWrap(0, 0, 0, 0);
+        scrollParams.height = dp(220);
+        logScrollView.setLayoutParams(scrollParams);
+
+        logBle = vStack();
+        logScrollView.addView(logBle);
+        configCard.addView(logScrollView);
+
         root.addView(configCard);
 
         // ── Fallback: modo AP ─────────────────────────────────────────────────
@@ -1523,13 +1579,70 @@ public class MainActivity extends Activity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
+    @SuppressLint("DefaultLocale")
     private void logBle(String msg) {
+        // Timestamp hh:mm:ss.ms
+        long now = System.currentTimeMillis();
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        cal.setTimeInMillis(now);
+        String ts = String.format("%02d:%02d:%02d.%03d",
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE),
+            cal.get(java.util.Calendar.SECOND),
+            cal.get(java.util.Calendar.MILLISECOND));
+
+        String line = ts + "  " + msg;
+        logBuffer.add(line);
+
         runOnUiThread(() -> {
             if (logBle == null) return;
-            TextView v = tv(msg, 12, msg.startsWith("✓") ? COLOR_GREEN : msg.startsWith("✗") ? Color.rgb(185, 28, 28) : COLOR_MUTED, false);
-            v.setPadding(0, dp(2), 0, dp(2));
+
+            int color;
+            if (msg.startsWith("✓"))       color = Color.rgb(52, 211, 153);   // verde claro
+            else if (msg.startsWith("✗"))  color = Color.rgb(252, 129, 129);  // vermelho claro
+            else if (msg.startsWith("←") || msg.startsWith("→")) color = Color.rgb(147, 197, 253); // azul claro
+            else                           color = Color.rgb(148, 163, 184);   // cinza claro
+
+            TextView v = new TextView(this);
+            v.setText(line);
+            v.setTextSize(11);
+            v.setTextColor(color);
+            v.setTypeface(android.graphics.Typeface.MONOSPACE);
+            v.setPadding(0, dp(1), 0, dp(1));
             logBle.addView(v);
+
+            // Auto-scroll para o final
+            if (logScrollView != null) {
+                logScrollView.post(() -> logScrollView.fullScroll(android.view.View.FOCUS_DOWN));
+            }
         });
+    }
+
+    private void copyLogsToClipboard() {
+        if (logBuffer.isEmpty()) {
+            toast("Nenhum log para copiar");
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== VigiaEscolar BLE Debug Log ===\n");
+        sb.append("Device: ").append(android.os.Build.MANUFACTURER).append(" ").append(android.os.Build.MODEL)
+          .append(" API ").append(android.os.Build.VERSION.SDK_INT).append("\n");
+        sb.append("MAC: ").append(connectedMac != null ? connectedMac : "N/A").append("\n");
+        sb.append("==================================\n");
+        for (String line : logBuffer) sb.append(line).append("\n");
+
+        android.content.ClipboardManager clipboard =
+            (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        android.content.ClipData clip =
+            android.content.ClipData.newPlainText("VigiaEscolar BLE Log", sb.toString());
+        clipboard.setPrimaryClip(clip);
+        toast("✓ " + logBuffer.size() + " linhas copiadas para a área de transferência!");
+    }
+
+    private void clearLogs() {
+        logBuffer.clear();
+        if (logBle != null) logBle.removeAllViews();
+        logBle("Log limpo.");
     }
 
     private void toast(String msg) { Toast.makeText(this, msg, Toast.LENGTH_LONG).show(); }
