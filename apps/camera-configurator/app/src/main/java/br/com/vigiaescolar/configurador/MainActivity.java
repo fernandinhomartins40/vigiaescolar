@@ -151,6 +151,8 @@ public class MainActivity extends Activity {
     private String             connectedDevSn   = null;
     private String             connectedMac     = null;
     private final Set<String>  foundDevices = new HashSet<>();
+    // Guarda o BluetoothDevice do ScanResult — necessário para MACs aleatórios (Android 12+)
+    private final java.util.Map<String, BluetoothDevice> scannedDevices = new java.util.HashMap<>();
 
     // Aguardando resposta BLE (AUTH ou WIFI_CFG)
     private volatile boolean waitingBleResponse = false;
@@ -430,6 +432,7 @@ public class MainActivity extends Activity {
     private void startBleScan() {
         if (bleScanner == null) return;
         foundDevices.clear();
+        scannedDevices.clear();
         bleDeviceList.removeAllViews();
         bleScanning = true;
         bleScanButton.setText("Parar busca BLE");
@@ -489,12 +492,16 @@ public class MainActivity extends Activity {
             boolean rssiClose = result.getRssi() >= -65; // muito próximo = provavelmente a câmera
             if (!isXm && !nameMatch && !rssiClose) return;
 
-            if (!foundDevices.add(mac)) return; // já listado
+            // Guarda sempre — mesmo se já listado, atualiza o device object (MAC rotativo pode mudar)
+            scannedDevices.put(mac, device);
+            if (!foundDevices.add(mac)) return; // já listado na UI
 
             String finalName = name != null ? name : ("Dispositivo BLE " + mac.substring(mac.length() - 5));
             int rssi = result.getRssi();
             boolean finalIsXm = isXm;
-            runOnUiThread(() -> addBleDevice(finalName, mac, rssi, finalIsXm));
+            // Detecta MAC aleatório (bits 6-7 do primeiro byte = 11 → privado não-resolvível)
+            boolean isRandomMac = (Integer.parseInt(mac.substring(0, 2), 16) & 0xC0) != 0x00;
+            runOnUiThread(() -> addBleDevice(finalName, mac, rssi, finalIsXm, isRandomMac));
         }
 
         @Override
@@ -518,11 +525,11 @@ public class MainActivity extends Activity {
     };
 
     @SuppressLint("MissingPermission")
-    private void addBleDevice(String name, String mac, int rssi, boolean confirmed) {
+    private void addBleDevice(String name, String mac, int rssi, boolean confirmed, boolean randomMac) {
         String tag = confirmed ? "[XM ✓] " : "[BLE] ";
-        String label = tag + name + "\n" + mac + "   " + rssi + " dBm\nToque para conectar";
+        String macNote = randomMac ? " [MAC aleatório]" : "";
+        String label = tag + name + "\n" + mac + macNote + "   " + rssi + " dBm\nToque para conectar";
         Button btn = listBtn(label, v -> {
-            // Para o scan antes de conectar — o stack BLE não gosta de scan + connect simultâneos
             stopBleScan();
             connectBleDevice(mac, name);
         });
@@ -534,7 +541,6 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void connectBleDevice(String mac, String name) {
-        // Fecha qualquer conexão anterior completamente antes de tentar nova
         if (bleGatt != null) {
             try { bleGatt.disconnect(); } catch (Exception ignored) {}
             try { bleGatt.close(); } catch (Exception ignored) {}
@@ -544,8 +550,13 @@ public class MainActivity extends Activity {
         connectedDevSn = null;
         connectedMac = mac;
 
-        logBle("Conectando em " + name + " (" + mac + ")...");
-        logBle("(Se travar em 'Conectando', desligue/ligue o BT do celular e tente novamente)");
+        // Detecta MAC aleatório: bits 7-6 do primeiro octeto != 00 → não-público
+        boolean isRandomMac = (Integer.parseInt(mac.substring(0, 2), 16) & 0xC0) != 0x00;
+
+        logBle("Conectando em " + name + " (" + mac + ")" + (isRandomMac ? " [MAC aleatório]" : "") + "...");
+        if (isRandomMac) {
+            logBle("⚠ MAC aleatório detectado. Android 12+ exige o objeto BluetoothDevice do scan.");
+        }
         setChip(statusBle, "Conectando...", COLOR_BLUE_MED);
 
         BluetoothManager mgr = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
@@ -555,23 +566,42 @@ public class MainActivity extends Activity {
             return;
         }
 
-        BluetoothDevice device = adapter.getRemoteDevice(mac);
+        // Usa o BluetoothDevice guardado do ScanResult se disponível (crítico para MACs aleatórios)
+        BluetoothDevice device = scannedDevices.get(mac);
+        if (device == null) {
+            logBle("⚠ Device não encontrado no cache do scan — usando getRemoteDevice (pode falhar com MAC aleatório)");
+            device = adapter.getRemoteDevice(mac);
+        } else {
+            logBle("Device recuperado do cache do scan. Tipo: " + device.getType());
+        }
+
+        logBle("Chamando connectGatt... TRANSPORT_LE, autoConnect=false");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
         } else {
             bleGatt = device.connectGatt(this, false, gattCallback);
         }
+        logBle("connectGatt retornou: " + (bleGatt != null ? "OK" : "NULL — erro crítico"));
 
-        // Timeout de 15s — se não conectar, avisa e fecha
+        if (bleGatt == null) {
+            logBle("✗ connectGatt retornou null. Tente desligar e ligar o Bluetooth do celular.");
+            setChip(statusBle, "Erro: connectGatt null", Color.rgb(185, 28, 28));
+            return;
+        }
+
+        // Timeout de 20s
         mainHandler.postDelayed(() -> {
             if (!bleConnected && bleGatt != null) {
-                logBle("✗ Timeout de conexão (15s). A câmera pode ter saído do modo de emparelhamento.");
-                logBle("   → Desligue e religue a câmera ou pressione o botão de reset para voltar ao modo BLE.");
-                setChip(statusBle, "Timeout — reinicie a câmera", Color.rgb(185, 28, 28));
+                logBle("✗ Timeout (20s) — onConnectionStateChange nunca chamado.");
+                logBle("   Possíveis causas:");
+                logBle("   1. Câmera saiu do modo de emparelhamento — reinicie-a");
+                logBle("   2. Reinicie o Bluetooth do celular e tente novamente");
+                logBle("   3. MAC aleatório expirou — refaça o scan");
+                setChip(statusBle, "Timeout — refaça o scan", Color.rgb(185, 28, 28));
                 try { bleGatt.disconnect(); bleGatt.close(); } catch (Exception ignored) {}
                 bleGatt = null;
             }
-        }, 15_000);
+        }, 20_000);
     }
 
     @SuppressLint("MissingPermission")
