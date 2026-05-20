@@ -144,7 +144,8 @@ public class MainActivity extends Activity {
     private ScrollView logScrollView;
 
     // ─── Estado BLE ───────────────────────────────────────────────────────────
-    private BluetoothLeScanner bleScanner;
+    private BluetoothAdapter   bleAdapter;   // usado para API legada startLeScan
+    private BluetoothLeScanner bleScanner;   // usado como fallback (nova API)
     private BluetoothGatt      bleGatt;
     private boolean            bleScanning  = false;
     private boolean            bleConnected = false;
@@ -399,38 +400,29 @@ public class MainActivity extends Activity {
 
     private void initBle() {
         BluetoothManager mgr = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        BluetoothAdapter adapter = mgr != null ? mgr.getAdapter() : null;
-        if (adapter == null || !adapter.isEnabled()) {
+        bleAdapter = mgr != null ? mgr.getAdapter() : null;
+        if (bleAdapter == null || !bleAdapter.isEnabled()) {
             logBle("Bluetooth desativado. Ative o Bluetooth e abra o app novamente.");
             if (bleScanButton != null) bleScanButton.setEnabled(false);
             return;
         }
-        bleScanner = adapter.getBluetoothLeScanner();
-        if (bleScanner == null) {
-            logBle("Bluetooth LE não disponível neste dispositivo.");
-            if (bleScanButton != null) bleScanButton.setEnabled(false);
-        } else {
-            logBle("Bluetooth LE pronto. Toque em 'Buscar câmeras BLE'.");
-        }
+        // Guarda também o scanner novo como fallback
+        bleScanner = bleAdapter.getBluetoothLeScanner();
+        logBle("Bluetooth LE pronto. Toque em 'Buscar câmeras BLE'.");
     }
 
     @SuppressLint("MissingPermission")
     private void toggleBleScan() {
-        // Reinicia o scanner caso o adapter tenha sido recriado (ex: BT desligou/ligou)
-        if (bleScanner == null) {
+        if (bleAdapter == null) {
             initBle();
-            if (bleScanner == null) { toast("Bluetooth LE não disponível"); return; }
+            if (bleAdapter == null) { toast("Bluetooth não disponível"); return; }
         }
-        if (bleScanning) {
-            stopBleScan();
-        } else {
-            startBleScan();
-        }
+        if (bleScanning) stopBleScan();
+        else startBleScan();
     }
 
     @SuppressLint("MissingPermission")
     private void startBleScan() {
-        if (bleScanner == null) return;
         foundDevices.clear();
         scannedDevices.clear();
         bleDeviceList.removeAllViews();
@@ -438,91 +430,147 @@ public class MainActivity extends Activity {
         bleScanButton.setText("Parar busca BLE");
         setChip(statusBle, "Escaneando... (60s)", COLOR_BLUE_MED);
         logBle("Buscando câmeras XM/iCSee... Coloque a câmera em modo de emparelhamento (LED piscando).");
-        bleScanner.startScan(bleScanCallback);
+
+        // Usa API legada startLeScan — exatamente como o app iCSee original
+        // Isso produz BluetoothDevice com tipo correto, ao contrário de BluetoothLeScanner
+        boolean started = bleAdapter.startLeScan(legacyScanCallback);
+        logBle("startLeScan (API legada): " + (started ? "OK" : "falhou — tentando API nova"));
+        if (!started && bleScanner != null) {
+            bleScanner.startScan(newScanCallback);
+            logBle("BluetoothLeScanner (API nova) iniciado como fallback");
+        }
+
         mainHandler.postDelayed(this::stopBleScan, 60_000);
     }
 
     @SuppressLint("MissingPermission")
     private void stopBleScan() {
         mainHandler.removeCallbacks(this::stopBleScan);
-        if (bleScanner != null && bleScanning) {
-            try { bleScanner.stopScan(bleScanCallback); } catch (Exception ignored) {}
+        if (bleAdapter != null) {
+            try { bleAdapter.stopLeScan(legacyScanCallback); } catch (Exception ignored) {}
+        }
+        if (bleScanner != null) {
+            try { bleScanner.stopScan(newScanCallback); } catch (Exception ignored) {}
         }
         bleScanning = false;
         if (bleScanButton != null) bleScanButton.setText("Buscar câmeras BLE");
         if (statusBle != null && !bleConnected) {
             int count = bleDeviceList != null ? bleDeviceList.getChildCount() : 0;
-            setChip(statusBle, count > 0 ? "Scan encerrado — " + count + " câmera(s) encontrada(s)" : "Nenhuma câmera encontrada", COLOR_MUTED);
+            setChip(statusBle, count > 0 ? "Scan encerrado — " + count + " dispositivo(s)" : "Nenhuma câmera encontrada", COLOR_MUTED);
         }
     }
 
-    private final ScanCallback bleScanCallback = new ScanCallback() {
+    // API legada — exatamente como o iCSee usa internamente (via BluetoothKit/inuker)
+    @SuppressLint("MissingPermission")
+    private final BluetoothAdapter.LeScanCallback legacyScanCallback = (device, rssi, scanRecord) -> {
+        if (device == null) return;
+        String mac  = device.getAddress();
+        String name = device.getName();
+
+        // Tenta extrair nome do advertising packet se device.getName() for nulo
+        if ((name == null || name.isEmpty()) && scanRecord != null) {
+            // Nome local está no tipo AD 0x09 (Complete Local Name) ou 0x08 (Shortened)
+            name = parseLocalName(scanRecord);
+        }
+
+        // Verifica service UUID 0x1910 no advertising packet
+        boolean isXm = hasServiceUuid(scanRecord, UUID_SERVICE);
+
+        String upperName = name != null ? name.toUpperCase(Locale.US) : "";
+        boolean nameMatch = upperName.contains("IPC") || upperName.contains("XM")
+                || upperName.contains("CAMERA") || upperName.contains("ICSEE")
+                || upperName.contains("CAM");
+        boolean rssiClose = rssi >= -70;
+        if (!isXm && !nameMatch && !rssiClose) return;
+
+        scannedDevices.put(mac, device);
+        if (!foundDevices.add(mac)) return;
+
+        String finalName = (name != null && !name.isEmpty()) ? name : ("BLE " + mac.substring(mac.length() - 5));
+        boolean finalIsXm = isXm;
+        int finalRssi = rssi;
+        logBle("Encontrado [legacyScan] tipo=" + device.getType() + " " + finalName + " " + mac + " " + rssi + "dBm" + (isXm ? " [XM✓]" : ""));
+        runOnUiThread(() -> addBleDevice(finalName, mac, finalRssi, finalIsXm, false));
+    };
+
+    // Nova API — fallback caso startLeScan falhe
+    private final ScanCallback newScanCallback = new ScanCallback() {
         @SuppressLint("MissingPermission")
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
             BluetoothDevice device = result.getDevice();
-            String mac = device.getAddress();
-
+            String mac  = device.getAddress();
             String name = device.getName();
-            if (name == null || name.isEmpty()) {
-                // Tenta pegar do ScanRecord
-                if (result.getScanRecord() != null && result.getScanRecord().getDeviceName() != null) {
-                    name = result.getScanRecord().getDeviceName();
-                } else {
-                    name = null;
-                }
-            }
+            if (name == null && result.getScanRecord() != null)
+                name = result.getScanRecord().getDeviceName();
 
-            // Verifica se anuncia o service XM 0x1910
             boolean isXm = false;
-            if (result.getScanRecord() != null) {
-                List<android.os.ParcelUuid> uuids = result.getScanRecord().getServiceUuids();
-                if (uuids != null) {
-                    for (android.os.ParcelUuid u : uuids) {
-                        if (u.getUuid().equals(UUID_SERVICE)) { isXm = true; break; }
-                    }
-                }
-            }
+            if (result.getScanRecord() != null && result.getScanRecord().getServiceUuids() != null)
+                for (android.os.ParcelUuid u : result.getScanRecord().getServiceUuids())
+                    if (u.getUuid().equals(UUID_SERVICE)) { isXm = true; break; }
 
-            // Filtra: aceita se tem service XM, ou nome sugestivo, ou RSSI alto próximo (possível câmera sem nome)
             String upperName = name != null ? name.toUpperCase(Locale.US) : "";
             boolean nameMatch = upperName.contains("IPC") || upperName.contains("XM")
                     || upperName.contains("CAMERA") || upperName.contains("ICSEE")
-                    || upperName.contains("CAM") || upperName.contains("VIGIA");
-            boolean rssiClose = result.getRssi() >= -65; // muito próximo = provavelmente a câmera
-            if (!isXm && !nameMatch && !rssiClose) return;
+                    || upperName.contains("CAM");
+            if (!isXm && !nameMatch && result.getRssi() < -70) return;
 
-            // Guarda sempre — mesmo se já listado, atualiza o device object (MAC rotativo pode mudar)
             scannedDevices.put(mac, device);
-            if (!foundDevices.add(mac)) return; // já listado na UI
+            if (!foundDevices.add(mac)) return;
 
-            String finalName = name != null ? name : ("Dispositivo BLE " + mac.substring(mac.length() - 5));
+            String finalName = (name != null && !name.isEmpty()) ? name : ("BLE " + mac.substring(mac.length() - 5));
             int rssi = result.getRssi();
             boolean finalIsXm = isXm;
-            // Detecta MAC aleatório (bits 6-7 do primeiro byte = 11 → privado não-resolvível)
-            boolean isRandomMac = (Integer.parseInt(mac.substring(0, 2), 16) & 0xC0) != 0x00;
-            runOnUiThread(() -> addBleDevice(finalName, mac, rssi, finalIsXm, isRandomMac));
+            logBle("Encontrado [newScan] tipo=" + device.getType() + " " + finalName + " " + mac + " " + rssi + "dBm");
+            runOnUiThread(() -> addBleDevice(finalName, mac, rssi, finalIsXm, false));
         }
 
         @Override
         public void onScanFailed(int errorCode) {
-            // Código 1 = já escaneando; 2 = app já usa scan; 3 = sem recurso; 4 = BT off
-            String msg;
-            switch (errorCode) {
-                case 1:  msg = "Scan já em execução (reinicie o BT se travar)"; break;
-                case 2:  msg = "Muitos apps escaneando ao mesmo tempo"; break;
-                case 3:  msg = "Sem recurso de hardware para scan"; break;
-                case 4:  msg = "Bluetooth desligado — ative e tente novamente"; break;
-                default: msg = "Erro no scan BLE (código " + errorCode + ")";
-            }
-            runOnUiThread(() -> {
-                logBle("✗ " + msg);
-                setChip(statusBle, "Erro no scan", Color.rgb(185, 28, 28));
-                bleScanning = false;
-                if (bleScanButton != null) bleScanButton.setText("Buscar câmeras BLE");
-            });
+            runOnUiThread(() -> logBle("✗ newScan falhou código=" + errorCode));
         }
     };
+
+    // Extrai nome local do advertising packet raw (AD type 0x08 ou 0x09)
+    private String parseLocalName(byte[] ad) {
+        if (ad == null) return null;
+        int i = 0;
+        while (i < ad.length - 1) {
+            int len = ad[i] & 0xFF;
+            if (len == 0) break;
+            if (i + len >= ad.length) break;
+            int type = ad[i + 1] & 0xFF;
+            if (type == 0x08 || type == 0x09) {
+                try { return new String(ad, i + 2, len - 1, StandardCharsets.UTF_8); }
+                catch (Exception ignored) {}
+            }
+            i += len + 1;
+        }
+        return null;
+    }
+
+    // Verifica se um UUID de 128 bits está nos service UUIDs do advertising packet
+    private boolean hasServiceUuid(byte[] ad, UUID target) {
+        if (ad == null) return false;
+        // Verifica pelo UUID completo em little-endian no packet
+        byte[] targetBytes = uuidToLe(target);
+        String adHex = bytesToHex(ad);
+        String targetHex = bytesToHex(targetBytes);
+        return adHex.contains(targetHex);
+    }
+
+    private byte[] uuidToLe(UUID uuid) {
+        ByteBuffer buf = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN);
+        buf.putLong(uuid.getLeastSignificantBits());
+        buf.putLong(uuid.getMostSignificantBits());
+        return buf.array();
+    }
+
+    private String bytesToHex(byte[] b) {
+        StringBuilder sb = new StringBuilder();
+        for (byte v : b) sb.append(String.format("%02x", v));
+        return sb.toString();
+    }
 
     @SuppressLint("MissingPermission")
     private void addBleDevice(String name, String mac, int rssi, boolean confirmed, boolean randomMac) {
@@ -577,39 +625,46 @@ public class MainActivity extends Activity {
             device = cached;
         }
 
-        // Tipo 0 (UNKNOWN) = Android não classificou o dispositivo ainda.
-        // TRANSPORT_LE + autoConnect=false falha silenciosamente para tipo UNKNOWN.
-        // Solução: autoConnect=true para tipo 0/desconhecido — força o stack a aguardar
-        // o dispositivo em vez de tentar conexão direta que é descartada.
-        boolean useAutoConnect = (device.getType() == BluetoothDevice.DEVICE_TYPE_UNKNOWN);
-        logBle("Chamando connectGatt... TRANSPORT_LE autoConnect=" + useAutoConnect
-               + " deviceType=" + device.getType());
+        // Usa autoConnect=false — como o iCSee faz via BluetoothKit
+        // O tipo 0 (UNKNOWN) é normal para BLE advertising-only; não impede conexão
+        // quando o BluetoothDevice vem diretamente do LeScanCallback (API legada)
+        logBle("connectGatt autoConnect=false TRANSPORT_LE deviceType=" + device.getType());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            bleGatt = device.connectGatt(this, useAutoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE);
+            bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
         } else {
-            bleGatt = device.connectGatt(this, useAutoConnect, gattCallback);
+            bleGatt = device.connectGatt(this, false, gattCallback);
         }
-        logBle("connectGatt retornou: " + (bleGatt != null ? "OK" : "NULL — erro crítico"));
+        logBle("connectGatt retornou: " + (bleGatt != null ? "OK" : "NULL"));
 
         if (bleGatt == null) {
-            logBle("✗ connectGatt retornou null. Tente desligar e ligar o Bluetooth do celular.");
+            logBle("✗ connectGatt null — reinicie o Bluetooth e tente novamente.");
             setChip(statusBle, "Erro: connectGatt null", Color.rgb(185, 28, 28));
             return;
         }
 
-        // Timeout: 40s para tipo UNKNOWN (autoConnect=true é mais lento), 20s para os demais
-        int timeoutMs = useAutoConnect ? 40_000 : 20_000;
-        logBle("Aguardando onConnectionStateChange... timeout=" + (timeoutMs/1000) + "s");
+        logBle("Aguardando onConnectionStateChange... timeout=20s");
         mainHandler.postDelayed(() -> {
             if (!bleConnected && bleGatt != null) {
-                logBle("✗ Timeout (" + (timeoutMs/1000) + "s) — onConnectionStateChange nunca chamado.");
-                logBle("   deviceType era: " + device.getType() + " (0=unknown, 1=classic, 2=LE, 3=dual)");
-                logBle("   Tente: reiniciar Bluetooth do celular e refazer o scan imediatamente");
-                setChip(statusBle, "Timeout — reinicie BT e refaça scan", Color.rgb(185, 28, 28));
+                logBle("✗ Timeout 20s — onConnectionStateChange nunca chamado.");
+                logBle("   deviceType=" + device.getType() + " mac=" + mac);
+                logBle("   → Reinicie o Bluetooth do celular e refaça o scan");
+                setChip(statusBle, "Timeout — reinicie BT", Color.rgb(185, 28, 28));
                 try { bleGatt.disconnect(); bleGatt.close(); } catch (Exception ignored) {}
                 bleGatt = null;
             }
-        }, timeoutMs);
+        }, 20_000);
+    }
+
+    // Limpa o cache de serviços GATT via reflection — workaround usado pelo iCSee/BluetoothKit
+    // Evita que o Android use serviços em cache de uma conexão anterior com o mesmo device
+    private void refreshDeviceCache(BluetoothGatt gatt) {
+        try {
+            java.lang.reflect.Method refresh = gatt.getClass().getMethod("refresh");
+            boolean result = (boolean) refresh.invoke(gatt);
+            logBle("refreshDeviceCache: " + result);
+        } catch (Exception e) {
+            logBle("refreshDeviceCache não disponível: " + e.getMessage());
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -643,12 +698,16 @@ public class MainActivity extends Activity {
                 return;
             }
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                runOnUiThread(() -> logBle("BLE conectado. Solicitando MTU 512..."));
-                // Passo 1: requestMtu ANTES de discoverServices (exigido pelo SDK XM)
-                try { gatt.requestMtu(512); } catch (Exception e) {
-                    // Fallback: segue sem MTU negociado
-                    mainHandler.postDelayed(() -> { if (bleGatt == gatt) gatt.discoverServices(); }, 500);
-                }
+                runOnUiThread(() -> logBle("✓ STATE_CONNECTED! Limpando cache GATT e solicitando MTU..."));
+                // Limpa cache GATT via reflection (workaround usado pelo iCSee/BluetoothKit)
+                // Necessário quando a câmera tem serviços em cache desatualizados no Android
+                refreshDeviceCache(gatt);
+                // requestMtu antes de discoverServices — exigido pelo SDK XM
+                mainHandler.postDelayed(() -> {
+                    try { gatt.requestMtu(512); } catch (Exception e) {
+                        mainHandler.postDelayed(() -> { if (bleGatt == gatt) gatt.discoverServices(); }, 300);
+                    }
+                }, 200);
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 bleConnected = false;
                 runOnUiThread(() -> {
