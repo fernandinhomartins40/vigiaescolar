@@ -567,19 +567,27 @@ public class MainActivity extends Activity {
         }
 
         // Usa o BluetoothDevice guardado do ScanResult se disponível (crítico para MACs aleatórios)
-        BluetoothDevice device = scannedDevices.get(mac);
-        if (device == null) {
+        BluetoothDevice cached = scannedDevices.get(mac);
+        final BluetoothDevice device;
+        if (cached == null) {
             logBle("⚠ Device não encontrado no cache do scan — usando getRemoteDevice (pode falhar com MAC aleatório)");
             device = adapter.getRemoteDevice(mac);
         } else {
-            logBle("Device recuperado do cache do scan. Tipo: " + device.getType());
+            logBle("Device recuperado do cache do scan. Tipo: " + cached.getType());
+            device = cached;
         }
 
-        logBle("Chamando connectGatt... TRANSPORT_LE, autoConnect=false");
+        // Tipo 0 (UNKNOWN) = Android não classificou o dispositivo ainda.
+        // TRANSPORT_LE + autoConnect=false falha silenciosamente para tipo UNKNOWN.
+        // Solução: autoConnect=true para tipo 0/desconhecido — força o stack a aguardar
+        // o dispositivo em vez de tentar conexão direta que é descartada.
+        boolean useAutoConnect = (device.getType() == BluetoothDevice.DEVICE_TYPE_UNKNOWN);
+        logBle("Chamando connectGatt... TRANSPORT_LE autoConnect=" + useAutoConnect
+               + " deviceType=" + device.getType());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+            bleGatt = device.connectGatt(this, useAutoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE);
         } else {
-            bleGatt = device.connectGatt(this, false, gattCallback);
+            bleGatt = device.connectGatt(this, useAutoConnect, gattCallback);
         }
         logBle("connectGatt retornou: " + (bleGatt != null ? "OK" : "NULL — erro crítico"));
 
@@ -589,19 +597,19 @@ public class MainActivity extends Activity {
             return;
         }
 
-        // Timeout de 20s
+        // Timeout: 40s para tipo UNKNOWN (autoConnect=true é mais lento), 20s para os demais
+        int timeoutMs = useAutoConnect ? 40_000 : 20_000;
+        logBle("Aguardando onConnectionStateChange... timeout=" + (timeoutMs/1000) + "s");
         mainHandler.postDelayed(() -> {
             if (!bleConnected && bleGatt != null) {
-                logBle("✗ Timeout (20s) — onConnectionStateChange nunca chamado.");
-                logBle("   Possíveis causas:");
-                logBle("   1. Câmera saiu do modo de emparelhamento — reinicie-a");
-                logBle("   2. Reinicie o Bluetooth do celular e tente novamente");
-                logBle("   3. MAC aleatório expirou — refaça o scan");
-                setChip(statusBle, "Timeout — refaça o scan", Color.rgb(185, 28, 28));
+                logBle("✗ Timeout (" + (timeoutMs/1000) + "s) — onConnectionStateChange nunca chamado.");
+                logBle("   deviceType era: " + device.getType() + " (0=unknown, 1=classic, 2=LE, 3=dual)");
+                logBle("   Tente: reiniciar Bluetooth do celular e refazer o scan imediatamente");
+                setChip(statusBle, "Timeout — reinicie BT e refaça scan", Color.rgb(185, 28, 28));
                 try { bleGatt.disconnect(); bleGatt.close(); } catch (Exception ignored) {}
                 bleGatt = null;
             }
-        }, 20_000);
+        }, timeoutMs);
     }
 
     @SuppressLint("MissingPermission")
