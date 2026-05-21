@@ -15,8 +15,10 @@ import android.bluetooth.BluetoothProfile;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -159,6 +161,9 @@ public class MainActivity extends Activity {
     private volatile boolean waitingBleResponse = false;
     private final Handler    mainHandler   = new Handler(Looper.getMainLooper());
 
+    // Receiver para bond state — usado no fluxo createBond → connectGatt
+    private BroadcastReceiver bondReceiver = null;
+
     // ─── Estado API ───────────────────────────────────────────────────────────
     private volatile String  apiToken      = null;
     private volatile String  selectedSchoolId = null;
@@ -206,6 +211,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         stopBleScan();
         disconnectBle();
+        unregisterBondReceiver();
         pool.shutdownNow();
         super.onDestroy();
     }
@@ -618,16 +624,77 @@ public class MainActivity extends Activity {
         BluetoothDevice cached = scannedDevices.get(mac);
         final BluetoothDevice device;
         if (cached == null) {
-            logBle("⚠ Device não encontrado no cache do scan — usando getRemoteDevice (pode falhar com MAC aleatório)");
+            logBle("⚠ Device não encontrado no cache do scan — usando getRemoteDevice");
             device = adapter.getRemoteDevice(mac);
         } else {
             logBle("Device recuperado do cache do scan. Tipo: " + cached.getType());
             device = cached;
         }
 
-        // Usa autoConnect=false — como o iCSee faz via BluetoothKit
-        // O tipo 0 (UNKNOWN) é normal para BLE advertising-only; não impede conexão
-        // quando o BluetoothDevice vem diretamente do LeScanCallback (API legada)
+        // Dispositivos tipo=0 (DEVICE_TYPE_UNKNOWN) causam bloqueio silencioso do connectGatt
+        // no Xiaomi MIUI/HyperOS API 31+. Solução: createBond() primeiro para registrar o
+        // device no stack BT do Android (muda tipo 0→2) e só então chamar connectGatt.
+        int bondState = device.getBondState();
+        logBle("Bond state atual: " + bondState + " (10=none, 11=bonding, 12=bonded)");
+
+        if (bondState == BluetoothDevice.BOND_BONDED) {
+            logBle("Já emparelhado. Conectando diretamente...");
+            doConnectGatt(device);
+        } else {
+            logBle("Iniciando createBond() para registrar device no stack BT...");
+            setChip(statusBle, "Emparelhando...", COLOR_BLUE_MED);
+            unregisterBondReceiver();
+            bondReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context ctx, Intent intent) {
+                    BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                    if (d == null || !d.getAddress().equals(mac)) return;
+                    int newBondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1);
+                    int prevBondState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1);
+                    runOnUiThread(() -> logBle("Bond state changed: " + prevBondState + " → " + newBondState));
+                    if (newBondState == BluetoothDevice.BOND_BONDED) {
+                        runOnUiThread(() -> logBle("✓ Bond OK. Conectando via GATT..."));
+                        unregisterBondReceiver();
+                        mainHandler.postDelayed(() -> doConnectGatt(d), 600);
+                    } else if (newBondState == BluetoothDevice.BOND_NONE && prevBondState == BluetoothDevice.BOND_BONDING) {
+                        // Bond falhou — tenta connectGatt mesmo assim (alguns dispositivos BLE
+                        // não aceitam bond mas conectam GATT normalmente)
+                        runOnUiThread(() -> logBle("⚠ Bond falhou/cancelado. Tentando connectGatt sem bond..."));
+                        unregisterBondReceiver();
+                        mainHandler.postDelayed(() -> doConnectGatt(d), 600);
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+            registerReceiver(bondReceiver, filter);
+            boolean bondOk = device.createBond();
+            logBle("createBond() retornou: " + bondOk);
+            if (!bondOk) {
+                logBle("createBond() retornou false — tentando connectGatt direto...");
+                unregisterBondReceiver();
+                doConnectGatt(device);
+            } else {
+                // Timeout de bond: 15s
+                mainHandler.postDelayed(() -> {
+                    if (!bleConnected && bondReceiver != null) {
+                        logBle("⚠ Timeout bond 15s — tentando connectGatt mesmo assim...");
+                        unregisterBondReceiver();
+                        doConnectGatt(device);
+                    }
+                }, 15_000);
+            }
+        }
+    }
+
+    private void unregisterBondReceiver() {
+        if (bondReceiver != null) {
+            try { unregisterReceiver(bondReceiver); } catch (Exception ignored) {}
+            bondReceiver = null;
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void doConnectGatt(BluetoothDevice device) {
         logBle("connectGatt autoConnect=false TRANSPORT_LE deviceType=" + device.getType());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             bleGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
@@ -638,21 +705,21 @@ public class MainActivity extends Activity {
 
         if (bleGatt == null) {
             logBle("✗ connectGatt null — reinicie o Bluetooth e tente novamente.");
-            setChip(statusBle, "Erro: connectGatt null", Color.rgb(185, 28, 28));
+            runOnUiThread(() -> setChip(statusBle, "Erro: connectGatt null", Color.rgb(185, 28, 28)));
             return;
         }
 
-        logBle("Aguardando onConnectionStateChange... timeout=20s");
+        logBle("Aguardando onConnectionStateChange... timeout=30s");
         mainHandler.postDelayed(() -> {
             if (!bleConnected && bleGatt != null) {
-                logBle("✗ Timeout 20s — onConnectionStateChange nunca chamado.");
-                logBle("   deviceType=" + device.getType() + " mac=" + mac);
-                logBle("   → Reinicie o Bluetooth do celular e refaça o scan");
-                setChip(statusBle, "Timeout — reinicie BT", Color.rgb(185, 28, 28));
+                logBle("✗ Timeout 30s — onConnectionStateChange nunca chamado.");
+                logBle("   deviceType=" + device.getType() + " mac=" + device.getAddress());
+                logBle("   → Coloque a câmera em modo BLE (LED piscando) e tente novamente");
+                setChip(statusBle, "Timeout — tente novamente", Color.rgb(185, 28, 28));
                 try { bleGatt.disconnect(); bleGatt.close(); } catch (Exception ignored) {}
                 bleGatt = null;
             }
-        }, 20_000);
+        }, 30_000);
     }
 
     // Limpa o cache de serviços GATT via reflection — workaround usado pelo iCSee/BluetoothKit
