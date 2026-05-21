@@ -634,18 +634,22 @@ public class MainActivity extends Activity {
         // Dispositivos tipo=0 (DEVICE_TYPE_UNKNOWN) causam bloqueio silencioso do connectGatt
         // no Xiaomi MIUI/HyperOS API 31+. Solução: createBond() primeiro para registrar o
         // device no stack BT do Android (muda tipo 0→2) e só então chamar connectGatt.
-        int bondState = device.getBondState();
-        logBle("Bond state atual: " + bondState + " (10=none, 11=bonding, 12=bonded)");
+        try {
+            int bondState = device.getBondState();
+            logBle("Bond state atual: " + bondState + " (10=none, 11=bonding, 12=bonded)");
 
-        if (bondState == BluetoothDevice.BOND_BONDED) {
-            logBle("Já emparelhado. Conectando diretamente...");
-            doConnectGatt(device);
-        } else {
+            if (bondState == BluetoothDevice.BOND_BONDED) {
+                logBle("Já emparelhado. Conectando diretamente...");
+                doConnectGatt(device);
+                return;
+            }
+
             logBle("Iniciando createBond() para registrar device no stack BT...");
             setChip(statusBle, "Emparelhando...", COLOR_BLUE_MED);
             unregisterBondReceiver();
             bondReceiver = new BroadcastReceiver() {
                 @Override
+                @SuppressLint("MissingPermission")
                 public void onReceive(Context ctx, Intent intent) {
                     BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                     if (d == null || !d.getAddress().equals(mac)) return;
@@ -657,8 +661,6 @@ public class MainActivity extends Activity {
                         unregisterBondReceiver();
                         mainHandler.postDelayed(() -> doConnectGatt(d), 600);
                     } else if (newBondState == BluetoothDevice.BOND_NONE && prevBondState == BluetoothDevice.BOND_BONDING) {
-                        // Bond falhou — tenta connectGatt mesmo assim (alguns dispositivos BLE
-                        // não aceitam bond mas conectam GATT normalmente)
                         runOnUiThread(() -> logBle("⚠ Bond falhou/cancelado. Tentando connectGatt sem bond..."));
                         unregisterBondReceiver();
                         mainHandler.postDelayed(() -> doConnectGatt(d), 600);
@@ -666,7 +668,12 @@ public class MainActivity extends Activity {
                 }
             };
             IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
-            registerReceiver(bondReceiver, filter);
+            // Android 14+ (API 34) exige flag explícita; broadcasts do sistema = RECEIVER_EXPORTED
+            if (Build.VERSION.SDK_INT >= 34) {
+                registerReceiver(bondReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(bondReceiver, filter);
+            }
             boolean bondOk = device.createBond();
             logBle("createBond() retornou: " + bondOk);
             if (!bondOk) {
@@ -683,6 +690,13 @@ public class MainActivity extends Activity {
                     }
                 }, 15_000);
             }
+        } catch (SecurityException se) {
+            logBle("✗ SecurityException em bond/connect: " + se.getMessage());
+            logBle("  → Verifique se a permissão BLUETOOTH_CONNECT foi concedida nas configurações do app");
+            setChip(statusBle, "Sem permissão BT", Color.rgb(185, 28, 28));
+        } catch (Exception e) {
+            logBle("✗ Erro inesperado ao conectar: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            setChip(statusBle, "Erro ao conectar", Color.rgb(185, 28, 28));
         }
     }
 
