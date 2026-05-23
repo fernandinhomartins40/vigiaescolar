@@ -149,8 +149,9 @@ public class MainActivity extends Activity {
     private BluetoothAdapter   bleAdapter;   // usado para API legada startLeScan
     private BluetoothLeScanner bleScanner;   // usado como fallback (nova API)
     private BluetoothGatt      bleGatt;
-    private boolean            bleScanning  = false;
-    private boolean            bleConnected = false;
+    private boolean            bleScanning   = false;
+    private boolean            bleConnected  = false;
+    private boolean            bleConnecting = false;  // evita conexões paralelas
     private String             connectedDevSn   = null;
     private String             connectedMac     = null;
     private final Set<String>  foundDevices = new HashSet<>();
@@ -595,6 +596,11 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void connectBleDevice(String mac, String name) {
+        if (bleConnecting || bleConnected) {
+            logBle("⚠ Já existe uma conexão em andamento — ignorando toque duplo.");
+            return;
+        }
+        bleConnecting = true;
         if (bleGatt != null) {
             try { bleGatt.disconnect(); } catch (Exception ignored) {}
             try { bleGatt.close(); } catch (Exception ignored) {}
@@ -691,11 +697,13 @@ public class MainActivity extends Activity {
                 }, 15_000);
             }
         } catch (SecurityException se) {
-            logBle("✗ SecurityException em bond/connect: " + se.getMessage());
-            logBle("  → Verifique se a permissão BLUETOOTH_CONNECT foi concedida nas configurações do app");
-            setChip(statusBle, "Sem permissão BT", Color.rgb(185, 28, 28));
+            logBle("✗ SecurityException em createBond: " + se.getMessage());
+            logBle("  → Tentando connectGatt direto sem bond...");
+            unregisterBondReceiver();
+            doConnectGatt(device);
         } catch (Exception e) {
             logBle("✗ Erro inesperado ao conectar: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            bleConnecting = false;
             setChip(statusBle, "Erro ao conectar", Color.rgb(185, 28, 28));
         }
     }
@@ -719,6 +727,7 @@ public class MainActivity extends Activity {
 
         if (bleGatt == null) {
             logBle("✗ connectGatt null — reinicie o Bluetooth e tente novamente.");
+            bleConnecting = false;
             runOnUiThread(() -> setChip(statusBle, "Erro: connectGatt null", Color.rgb(185, 28, 28)));
             return;
         }
@@ -730,6 +739,7 @@ public class MainActivity extends Activity {
                 logBle("   deviceType=" + device.getType() + " mac=" + device.getAddress());
                 logBle("   → Coloque a câmera em modo BLE (LED piscando) e tente novamente");
                 setChip(statusBle, "Timeout — tente novamente", Color.rgb(185, 28, 28));
+                bleConnecting = false;
                 try { bleGatt.disconnect(); bleGatt.close(); } catch (Exception ignored) {}
                 bleGatt = null;
             }
@@ -758,6 +768,7 @@ public class MainActivity extends Activity {
             bleGatt = null;
         }
         bleConnected = false;
+        bleConnecting = false;
         connectedDevSn = null;
     }
 
@@ -776,14 +787,14 @@ public class MainActivity extends Activity {
                 try { gatt.close(); } catch (Exception ignored) {}
                 if (bleGatt == gatt) bleGatt = null;
                 bleConnected = false;
+                bleConnecting = false;
                 return;
             }
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                bleConnecting = false;
+                bleConnected = true;
                 runOnUiThread(() -> logBle("✓ STATE_CONNECTED! Limpando cache GATT e solicitando MTU..."));
-                // Limpa cache GATT via reflection (workaround usado pelo iCSee/BluetoothKit)
-                // Necessário quando a câmera tem serviços em cache desatualizados no Android
                 refreshDeviceCache(gatt);
-                // requestMtu antes de discoverServices — exigido pelo SDK XM
                 mainHandler.postDelayed(() -> {
                     try { gatt.requestMtu(512); } catch (Exception e) {
                         mainHandler.postDelayed(() -> { if (bleGatt == gatt) gatt.discoverServices(); }, 300);
@@ -791,6 +802,7 @@ public class MainActivity extends Activity {
                 }, 200);
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 bleConnected = false;
+                bleConnecting = false;
                 runOnUiThread(() -> {
                     logBle("BLE desconectado.");
                     setChip(statusBle, "Desconectado", COLOR_MUTED);
