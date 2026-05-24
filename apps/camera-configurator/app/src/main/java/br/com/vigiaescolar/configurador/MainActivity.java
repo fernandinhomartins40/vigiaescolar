@@ -39,6 +39,10 @@ import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.MediaPlayer;
+import android.net.Uri;
+import android.widget.MediaController;
+import android.widget.VideoView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -254,6 +258,9 @@ public class MainActivity extends Activity {
     private String      selectedCameraName = null;
     private String      selectedWifiSsid   = null;
     private String      selectedWifiCaps   = null;  // capabilities da rede WiFi escolhida
+    // IP descoberto na LAN após configuração — usado no payload de registerCamera
+    private volatile String discoveredCameraIp = null;
+    private volatile boolean ipDiscoveryRunning = false;
 
     // Câmeras configuradas (persistido em SharedPreferences "cameras")
     private LinearLayout myCamerasList;
@@ -1471,25 +1478,164 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Varre subnet local procurando câmera XM (porta DVRIP 34567 aberta). */
+    /**
+     * Varre subnet local procurando câmera XM. Quando achar host com DVRIP
+     * aberta (porta 34567), valida que é a câmera certa pelo SN via OPMachine.
+     * Se sn vazio, aceita qualquer câmera XM como fallback.
+     */
     private String findCameraIpOnLan(String sn, String mac) {
         java.util.List<String> ips = localSubnetIps();
         java.util.concurrent.atomic.AtomicReference<String> found = new java.util.concurrent.atomic.AtomicReference<>(null);
+        java.util.concurrent.atomic.AtomicReference<String> fallback = new java.util.concurrent.atomic.AtomicReference<>(null);
         java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+        final String expectedSn = sn == null ? "" : sn.trim();
         for (String ip : ips) {
             futures.add(pool.submit(() -> {
                 if (found.get() != null) return;
-                if (isOpen(ip, 34567, 350)) {
-                    // Porta DVRIP aberta = provavelmente câmera XM
+                if (!isOpen(ip, 34567, 350)) return;
+                // Porta aberta — tenta validar SN se conhecemos um
+                if (expectedSn.isEmpty()) {
+                    fallback.compareAndSet(null, ip);
+                    return;
+                }
+                String remoteSn = dvripGetSerialNumber(ip);
+                if (remoteSn != null && remoteSn.equalsIgnoreCase(expectedSn)) {
                     found.compareAndSet(null, ip);
+                } else if (remoteSn != null) {
+                    // É câmera XM mas SN diferente — guarda como fallback se não achar a certa
+                    fallback.compareAndSet(null, ip);
                 }
             }));
         }
         for (java.util.concurrent.Future<?> f : futures) {
-            try { f.get(4, java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ignored) {}
+            try { f.get(6, java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ignored) {}
             if (found.get() != null) break;
         }
-        return found.get();
+        return found.get() != null ? found.get() : fallback.get();
+    }
+
+    /**
+     * Consulta SN da câmera via DVRIP OPMachine (sem login — algumas firmwares
+     * deixam isso público; outras exigem login, nesse caso retorna null).
+     * Usado para confirmar identidade de uma câmera achada na LAN.
+     */
+    private String dvripGetSerialNumber(String ip) {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(ip, DVRIP_PORT), 1500);
+            s.setSoTimeout(2500);
+            InputStream in = s.getInputStream();
+            OutputStream out = s.getOutputStream();
+            // Tenta login anônimo (admin sem senha) primeiro
+            JSONObject login = new JSONObject();
+            login.put("EncryptType", "MD5");
+            login.put("LoginType",   "DVRIP-Web");
+            login.put("PassWord",    dvripMd5(""));
+            login.put("UserName",    "admin");
+            login.put("SessionID",   "0x0000000000");
+            dvripSend(out, 0, seqNo.getAndIncrement(), MSG_LOGIN, login.toString().getBytes(StandardCharsets.UTF_8));
+            JSONObject loginRsp = dvripRead(in);
+            int ret = loginRsp.optInt("Ret", -1);
+            if (ret != DVRIP_OK && ret != 101) return null;
+            String sid = loginRsp.optString("SessionID", "0x0");
+            int sessionInt = parseHex(sid);
+
+            // GetSystemInfo (msg 1020) — retorna SerialNo
+            JSONObject body = new JSONObject();
+            body.put("Name",      "SystemInfo");
+            body.put("SessionID", sid);
+            dvripSend(out, sessionInt, seqNo.getAndIncrement(), 1020, body.toString().getBytes(StandardCharsets.UTF_8));
+            JSONObject info = dvripRead(in);
+            JSONObject sysInfo = info.optJSONObject("SystemInfo");
+            if (sysInfo == null) return null;
+            String snHex = sysInfo.optString("SerialNo", "");
+            if (snHex == null || snHex.isEmpty()) return null;
+            // Algumas firmwares retornam o SN como hex puro, outras como string
+            return snHex.trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Loop de descoberta após config: a câmera leva 10-40s pra entrar no Wi-Fi
+     * e obter IP. Tenta a cada 8s por 90s. Quando achar, salva no DB local +
+     * atualiza no servidor (se já estiver cadastrada).
+     */
+    private void startCameraIpDiscovery() {
+        if (ipDiscoveryRunning) return;
+        ipDiscoveryRunning = true;
+        discoveredCameraIp = null;
+        final String mac = selectedCameraMac;
+        final String sn  = connectedDevSn != null ? connectedDevSn : "";
+        logBle("🔍 Procurando IP da câmera na rede local (até 90s)...");
+        pool.execute(() -> {
+            long deadline = System.currentTimeMillis() + 90_000;
+            while (System.currentTimeMillis() < deadline && discoveredCameraIp == null) {
+                String ip = findCameraIpOnLan(sn, mac);
+                if (ip != null && !ip.isEmpty()) {
+                    discoveredCameraIp = ip;
+                    runOnUiThread(() -> logBle("✓ Câmera encontrada em " + ip));
+                    if (mac != null && !mac.isEmpty()) updateSavedCameraIp(mac, ip);
+                    // Atualiza no servidor se já cadastrada
+                    pushCameraIpToServer(mac, ip);
+                    break;
+                }
+                try { Thread.sleep(8000); } catch (InterruptedException ie) { break; }
+            }
+            ipDiscoveryRunning = false;
+            if (discoveredCameraIp == null) {
+                runOnUiThread(() -> logBle("⚠ IP da câmera não encontrado em 90s. Você pode tentar de novo em \"Minhas câmeras\" → \"Atualizar miniatura\"."));
+            }
+        });
+    }
+
+    /** Faz PATCH (ou re-POST com upsert) na API para atualizar IP/streamUrl. */
+    private void pushCameraIpToServer(final String mac, final String ip) {
+        if (apiToken == null || apiToken.isEmpty() || mac == null || mac.isEmpty()) return;
+        final String apiUrl = API_BASE_URL;
+        pool.execute(() -> {
+            try {
+                // GET /cameras para achar o ID dessa câmera pelo bluetoothMac
+                HttpURLConnection c = (HttpURLConnection) new URL(apiUrl + "/cameras").openConnection();
+                c.setRequestMethod("GET");
+                c.setRequestProperty("Authorization", "Bearer " + apiToken);
+                c.setConnectTimeout(5000); c.setReadTimeout(7000);
+                if (c.getResponseCode() >= 300) return;
+                String raw = readStream(c.getInputStream()).trim();
+                JSONArray arr = raw.startsWith("[") ? new JSONArray(raw)
+                        : new JSONObject(raw).optJSONArray("data");
+                if (arr == null) return;
+                String camId = null;
+                JSONObject cam = null;
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject co = arr.optJSONObject(i);
+                    if (co != null && mac.equalsIgnoreCase(co.optString("bluetoothMac", ""))) {
+                        camId = co.optString("id", "");
+                        cam = co;
+                        break;
+                    }
+                }
+                if (camId == null || camId.isEmpty() || cam == null) return;
+
+                // PUT /cameras/{id} com novo streamUrl baseado no IP
+                String camPass = cameraPassInput != null ? cameraPassInput.getText().toString().trim() : "";
+                String rtspUrl = "rtsp://" + ip + ":554/user=admin_password=" + camPass + "_channel=1_stream=0.sdp?real_stream";
+                JSONObject payload = new JSONObject();
+                payload.put("url", rtspUrl);
+                payload.put("porta", 554);
+
+                HttpURLConnection up = (HttpURLConnection) new URL(apiUrl + "/cameras/" + camId).openConnection();
+                up.setRequestMethod("PUT");
+                up.setRequestProperty("Content-Type", "application/json");
+                up.setRequestProperty("Authorization", "Bearer " + apiToken);
+                up.setConnectTimeout(5000); up.setReadTimeout(7000); up.setDoOutput(true);
+                up.getOutputStream().write(payload.toString().getBytes(StandardCharsets.UTF_8));
+                int code = up.getResponseCode();
+                runOnUiThread(() -> logBle("Atualizando IP no servidor: HTTP " + code));
+            } catch (Exception e) {
+                runOnUiThread(() -> logBle("⚠ Falha ao atualizar IP no servidor: " + e.getMessage()));
+            }
+        });
     }
 
     // ── Inicializa widgets do fluxo legado (escondidos) ───────────────────────
@@ -2399,6 +2545,9 @@ public class MainActivity extends Activity {
                 // Salva câmera localmente para aparecer em "Minhas câmeras"
                 saveConfiguredCamera();
                 mainHandler.postDelayed(this::disconnectBle, 1500);
+                // Dispara descoberta de IP em background: a câmera leva 10-40s
+                // para conectar ao WiFi e obter IP via DHCP. Varremos por 90s.
+                startCameraIpDiscovery();
                 // Avança para tela de sucesso após 2s (deixa logs visíveis um instante)
                 mainHandler.postDelayed(() -> showStep(WIZ_SUCCESS), 2000);
             } else {
@@ -2986,20 +3135,34 @@ public class MainActivity extends Activity {
     // ─── PASSO 5: Cadastrar câmera ────────────────────────────────────────────
 
     private void registerCamera() {
-        String apiUrl   = apiUrlInput.getText().toString().trim().replaceAll("/$", "");
+        // URL é hardcoded (API_BASE_URL)
+        String apiUrl   = API_BASE_URL;
         String schoolId = schoolInput.getText().toString().trim();
         String name     = cameraNameInput.getText().toString().trim();
         String loc      = cameraLocInput.getText().toString().trim();
-        String ip       = cameraIpInput.getText().toString().trim();
 
-        if (apiToken == null || apiToken.isEmpty()) { toast("Faça login na API (Passo 4)"); return; }
-        if (schoolId.isEmpty()) { toast("Selecione uma escola (Passo 4)"); return; }
+        if (apiToken == null || apiToken.isEmpty()) { toast("Faça login primeiro"); return; }
+        if (schoolId.isEmpty()) { toast("Selecione uma escola"); return; }
         if (name.isEmpty()) { toast("Informe o nome da câmera"); return; }
-        if (ip.isEmpty()) ip = "DHCP"; // IP ainda não conhecido (câmera acabou de conectar)
 
-        String finalIp  = ip;
-        String finalLoc = loc.isEmpty() ? "Configurada via APK" : loc;
-        String rtspUrl  = "rtsp://" + finalIp + ":554/user={username}_password={password}_channel=1_stream=0.sdp?real_stream";
+        // Usa o IP descoberto via DVRIP scan (preenchido por startCameraIpDiscovery)
+        // OU o que o usuário digitou no fluxo legado. Senão, "DHCP" como placeholder.
+        String ip;
+        if (discoveredCameraIp != null && !discoveredCameraIp.isEmpty()) {
+            ip = discoveredCameraIp;
+        } else if (cameraIpInput != null && !cameraIpInput.getText().toString().trim().isEmpty()) {
+            ip = cameraIpInput.getText().toString().trim();
+        } else {
+            ip = "DHCP";
+        }
+
+        final String finalIp  = ip;
+        final String finalLoc = loc.isEmpty() ? "Configurada via APK" : loc;
+        // Senha da câmera fica nas credenciais — URL usa placeholder padrão XM
+        final String camPass = cameraPassInput.getText().toString().trim();
+        final String rtspUrl = ip.equals("DHCP")
+            ? "rtsp://CAMERA_IP:554/user=admin_password=" + camPass + "_channel=1_stream=0.sdp?real_stream"
+            : "rtsp://" + ip + ":554/user=admin_password=" + camPass + "_channel=1_stream=0.sdp?real_stream";
 
         pool.execute(() -> {
             try {
@@ -3013,8 +3176,8 @@ public class MainActivity extends Activity {
                 payload.put("resolucao", "1080p");
                 payload.put("fps", 30);
                 payload.put("status", "Ativa");
-                payload.put("usuario", "yura");
-                payload.put("senha", cameraPassInput.getText().toString().trim());
+                payload.put("usuario", "admin");  // padrão XM, não yura
+                payload.put("senha", camPass);
                 // Identificadores físicos — permitem ressincronização após reinstalação
                 if (selectedCameraMac != null && !selectedCameraMac.isEmpty()) {
                     payload.put("bluetoothMac", selectedCameraMac);
