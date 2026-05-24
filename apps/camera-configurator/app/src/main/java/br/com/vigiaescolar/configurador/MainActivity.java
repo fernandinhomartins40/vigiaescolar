@@ -225,8 +225,10 @@ public class MainActivity extends Activity {
     private static final int WIZ_WIFI_PASSWORD = 3;
     private static final int WIZ_CONFIGURING   = 4;
     private static final int WIZ_SUCCESS       = 5;
+    private static final int WIZ_LOGIN         = 6;
+    private static final int WIZ_REGISTER      = 7;
     private FrameLayout wizardContainer;
-    private View[]      wizardPages = new View[6];
+    private View[]      wizardPages = new View[8];
     private int         currentStep = WIZ_WELCOME;
     private TextView    stepIndicator;
     private TextView    stepTitleHeader;
@@ -350,6 +352,8 @@ public class MainActivity extends Activity {
         wizardPages[WIZ_WIFI_PASSWORD] = buildPageWifiPassword();
         wizardPages[WIZ_CONFIGURING]   = buildPageConfiguring();
         wizardPages[WIZ_SUCCESS]       = buildPageSuccess();
+        wizardPages[WIZ_LOGIN]         = buildPageLogin();
+        wizardPages[WIZ_REGISTER]      = buildPageRegister();
         for (View page : wizardPages) wizardContainer.addView(page);
 
         // Inicializa também widgets/campos do fluxo legado (modo AP, API, registro)
@@ -368,15 +372,20 @@ public class MainActivity extends Activity {
         for (int i = 0; i < wizardPages.length; i++) {
             wizardPages[i].setVisibility(i == step ? View.VISIBLE : View.GONE);
         }
-        int totalSteps = 5; // contamos sem o welcome
         if (step == WIZ_WELCOME) {
             stepIndicator.setText("Bem-vindo");
             stepTitleHeader.setText("Configurador de Câmera");
         } else if (step == WIZ_SUCCESS) {
-            stepIndicator.setText("Concluído");
-            stepTitleHeader.setText("Câmera configurada");
+            stepIndicator.setText("Wi-Fi configurado");
+            stepTitleHeader.setText("Câmera no Wi-Fi");
+        } else if (step == WIZ_LOGIN) {
+            stepIndicator.setText("Passo 6 de 7");
+            stepTitleHeader.setText("Entrar no VigiaEscolar");
+        } else if (step == WIZ_REGISTER) {
+            stepIndicator.setText("Passo 7 de 7");
+            stepTitleHeader.setText("Cadastrar câmera");
         } else {
-            stepIndicator.setText("Passo " + step + " de " + totalSteps);
+            stepIndicator.setText("Passo " + step + " de 7");
             String[] titles = {"", "Encontrar câmera", "Escolher rede WiFi",
                 "Senha da rede", "Enviando configuração"};
             stepTitleHeader.setText(titles[step]);
@@ -600,36 +609,189 @@ public class MainActivity extends Activity {
         return wizardScrollPage(page);
     }
 
-    // ── Página 5: Sucesso ─────────────────────────────────────────────────────
+    // ── Página 5: Sucesso (Wi-Fi enviado) ─────────────────────────────────────
     private View buildPageSuccess() {
         LinearLayout page = wizardPage();
-        page.setGravity(Gravity.CENTER);
+        page.setGravity(Gravity.CENTER_HORIZONTAL);
 
         TextView icon = tv("✓", 64, COLOR_GREEN, true);
         icon.setGravity(Gravity.CENTER);
+        icon.setPadding(0, dp(20), 0, 0);
         page.addView(icon);
 
-        TextView title = tv("Câmera configurada!", 22, COLOR_BLUE, true);
+        TextView title = tv("Wi-Fi enviado!", 22, COLOR_BLUE, true);
         title.setGravity(Gravity.CENTER);
         title.setPadding(0, dp(8), 0, dp(8));
         page.addView(title);
 
         TextView desc = muted(
-            "A câmera recebeu o Wi-Fi e está conectando à rede.\n\n" +
-            "Aguarde alguns instantes até o LED ficar fixo. " +
-            "Depois você pode buscar o IP da câmera na rede local " +
-            "e cadastrá-la no painel VigiaEscolar."
+            "A câmera está conectando à rede Wi-Fi da escola.\n" +
+            "Aguarde alguns instantes até o LED ficar fixo.\n\n" +
+            "Próximo passo: cadastrar a câmera no painel VigiaEscolar " +
+            "para que ela apareça no monitoramento."
         );
         desc.setGravity(Gravity.CENTER);
         desc.setPadding(0, 0, 0, dp(28));
         page.addView(desc);
 
-        page.addView(primaryBtn("Configurar outra câmera", v -> {
+        page.addView(gap(primaryBtn("Cadastrar no VigiaEscolar", v -> {
+            // Vai para login se ainda não autenticou, senão direto pro cadastro
+            if (apiToken == null || apiToken.isEmpty()) {
+                showStep(WIZ_LOGIN);
+                if (apiUrlInput.getText().toString().trim().isEmpty()) discoverApis();
+            } else {
+                showStep(WIZ_REGISTER);
+            }
+        }), dp(8)));
+
+        page.addView(gap(secondaryBtn("Configurar outra câmera", v -> {
             resetWizardState();
             showStep(WIZ_WELCOME);
-        }));
+        }), dp(10)));
 
         return page;
+    }
+
+    // ── Página 6: Login VigiaEscolar ──────────────────────────────────────────
+    private View buildPageLogin() {
+        LinearLayout page = wizardPage();
+
+        page.addView(wizardHeading("Entrar no VigiaEscolar"));
+        page.addView(muted("Use o mesmo e-mail e senha do painel web. A URL da API é detectada automaticamente na rede local."));
+
+        // Inputs visíveis (sobrescrevem os do initLegacyWidgets)
+        apiUrlInput = input("http://192.168.x.x:3001/api");
+        emailInput = input("email@escola.com");
+        appPasswordInput = inputPass("Senha do painel");
+
+        // Carrega valores salvos do SharedPreferences
+        android.content.SharedPreferences prefs = getSharedPreferences("vigiaescolar", MODE_PRIVATE);
+        apiUrlInput.setText(prefs.getString("api_url", ""));
+        emailInput.setText(prefs.getString("api_email", ""));
+
+        page.addView(gap(secondaryBtn("Detectar API na rede", v -> discoverApis()), dp(14)));
+        apiList = vStack();
+        page.addView(gap(apiList, dp(4)));
+
+        page.addView(field("URL da API", apiUrlInput));
+        page.addView(field("E-mail", emailInput));
+        page.addView(field("Senha", appPasswordInput));
+
+        statusApi = statusChip("Não conectado");
+        page.addView(gap(statusApi, dp(10)));
+
+        // Botões: Voltar / Entrar
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setLayoutParams(matchWrap(0, dp(18), 0, 0));
+
+        Button backBtn = secondaryBtn("Voltar", v -> showStep(WIZ_SUCCESS));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bp.rightMargin = dp(6);
+        backBtn.setLayoutParams(bp);
+        btnRow.addView(backBtn);
+
+        Button loginBtn = primaryBtn("Entrar", v -> {
+            // Salva credenciais (não a senha) antes de tentar login
+            android.content.SharedPreferences.Editor ed = getSharedPreferences("vigiaescolar", MODE_PRIVATE).edit();
+            ed.putString("api_url", apiUrlInput.getText().toString().trim());
+            ed.putString("api_email", emailInput.getText().toString().trim());
+            ed.apply();
+            loginApiAndAdvance();
+        });
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        cp.leftMargin = dp(6);
+        loginBtn.setLayoutParams(cp);
+        btnRow.addView(loginBtn);
+
+        page.addView(btnRow);
+
+        return wizardScrollPage(page);
+    }
+
+    // ── Página 7: Cadastrar câmera ────────────────────────────────────────────
+    private View buildPageRegister() {
+        LinearLayout page = wizardPage();
+
+        page.addView(wizardHeading("Cadastrar câmera"));
+        page.addView(muted("Dê um nome e localização para identificar a câmera no painel."));
+
+        // Selecionar escola
+        TextView schoolLbl = tv("Escola onde a câmera está instalada:", 13, COLOR_TEXT, true);
+        schoolLbl.setPadding(0, dp(14), 0, dp(6));
+        page.addView(schoolLbl);
+
+        schoolList = vStack();
+        page.addView(schoolList);
+
+        cameraNameInput = input("Ex: Pátio Central");
+        cameraNameInput.setText("Câmera XM");
+        cameraLocInput  = input("Ex: Sala 12, Portão Norte");
+        page.addView(gap(field("Nome da câmera", cameraNameInput), dp(14)));
+        page.addView(field("Localização", cameraLocInput));
+
+        page.addView(gap(muted("O IP será detectado automaticamente quando a câmera estiver conectada ao Wi-Fi. Caso ainda não tenha aparecido, o cadastro será feito sem IP e atualizado depois."), dp(14)));
+
+        // Botões: Voltar / Cadastrar
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setLayoutParams(matchWrap(0, dp(20), 0, 0));
+
+        Button backBtn = secondaryBtn("Voltar", v -> showStep(WIZ_SUCCESS));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bp.rightMargin = dp(6);
+        backBtn.setLayoutParams(bp);
+        btnRow.addView(backBtn);
+
+        Button regBtn = primaryBtn("Cadastrar câmera", v -> registerCameraFromWizard());
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        cp.leftMargin = dp(6);
+        regBtn.setLayoutParams(cp);
+        btnRow.addView(regBtn);
+
+        page.addView(btnRow);
+
+        return wizardScrollPage(page);
+    }
+
+    private void loginApiAndAdvance() {
+        // loginApi() já mostra status e chama fetchSchools no sucesso.
+        // Aqui adicionamos o avanço de tela quando o login termina OK.
+        loginApi();
+        // Polling simples: aguarda apiToken aparecer (até 12s)
+        final int[] waits = {0};
+        Runnable poll = new Runnable() {
+            @Override public void run() {
+                if (apiToken != null && !apiToken.isEmpty()) {
+                    showStep(WIZ_REGISTER);
+                    return;
+                }
+                if (++waits[0] < 24) mainHandler.postDelayed(this, 500);
+            }
+        };
+        mainHandler.postDelayed(poll, 500);
+    }
+
+    private void registerCameraFromWizard() {
+        if (apiToken == null || apiToken.isEmpty()) {
+            toast("Faça login primeiro");
+            showStep(WIZ_LOGIN);
+            return;
+        }
+        if (selectedSchoolId == null || selectedSchoolId.isEmpty()) {
+            toast("Selecione a escola");
+            return;
+        }
+        if (cameraNameInput.getText().toString().trim().isEmpty()) {
+            toast("Informe o nome da câmera");
+            return;
+        }
+        registerCamera();
+        // Após enviar, aguarda 1.5s e volta pra welcome (toast informa sucesso/erro)
+        mainHandler.postDelayed(() -> {
+            resetWizardState();
+            showStep(WIZ_WELCOME);
+        }, 1800);
     }
 
     // ── Inicializa widgets do fluxo legado (escondidos) ───────────────────────
