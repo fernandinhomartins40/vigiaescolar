@@ -101,11 +101,16 @@ function buildUsbArgs(camera: GatewayCamera, filePath: string): string[] {
 
 function buildNetworkArgs(camera: GatewayCamera, filePath: string): string[] {
   const streamUrl = withCredentials(camera);
+  // FFmpeg 8+ removeu `-stimeout`. O RTSP demuxer expõe `-timeout` em
+  // microssegundos. Mantém o mesmo valor (snapshotTimeoutMs * 1000).
+  // Verificado em produção via `ffmpeg -h demuxer=rtsp` (vps-gateway-01,
+  // FFmpeg 8.0.1).
+  const timeoutMicroseconds = String(Math.max(config.snapshotTimeoutMs, 1000) * 1000);
   return [
     "-hide_banner",
     "-loglevel", "error",
     "-rtsp_transport", "tcp",
-    "-stimeout", String(Math.max(config.snapshotTimeoutMs, 1000) * 1000),
+    "-timeout", timeoutMicroseconds,
     "-i", streamUrl,
     "-frames:v", "1",
     "-q:v", "2",
