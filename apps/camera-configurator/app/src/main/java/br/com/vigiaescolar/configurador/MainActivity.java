@@ -1180,21 +1180,54 @@ public class MainActivity extends Activity {
 
         // Diagnóstico em background
         pool.execute(() -> {
+            StringBuilder pre = new StringBuilder();
+            pre.append("=== BUSCA INICIAL ===\n");
+            String myIp = wifiIp();
+            pre.append("Meu IP (celular no Wi-Fi): ").append(myIp != null ? myIp : "(não detectado)").append("\n");
+            pre.append("IP salvo no banco: ").append(savedIp.isEmpty() ? "(vazio)" : savedIp).append("\n");
+
             String ip = savedIp;
-            if (ip == null || ip.isEmpty()) ip = findCameraIpOnLan(sn, mac);
+
+            // Se IP salvo existe, valida que a porta DVRIP responde antes de confiar nele
+            if (ip != null && !ip.isEmpty()) {
+                pre.append("Testando IP salvo...\n");
+                boolean savedOk = isOpen(ip, DVRIP_PORT, 1500);
+                pre.append("Porta 34567 em ").append(ip).append(": ").append(savedOk ? "ABERTA" : "FECHADA").append("\n");
+                if (!savedOk) {
+                    pre.append("IP salvo não responde — ignorando e varrendo subnet...\n");
+                    ip = "";
+                }
+            }
+
             if (ip == null || ip.isEmpty()) {
-                runOnUiThread(() -> tv.setText(
+                pre.append("Varrendo subnet local (porta 34567)...\n");
+                ip = findCameraIpOnLan(sn, mac);
+                pre.append("Resultado: ").append(ip == null ? "(não encontrou)" : ip).append("\n");
+            }
+
+            pre.append("=== FIM BUSCA ===\n\n");
+
+            if (ip == null || ip.isEmpty()) {
+                final String prefinal = pre.toString();
+                runOnUiThread(() -> tv.setText(prefinal +
                     "✗ Câmera não encontrada na rede.\n\n" +
                     "Verifique que:\n" +
                     "1. O celular está conectado no MESMO Wi-Fi que a câmera\n" +
                     "2. A câmera está ligada e com LED fixo (conectada)\n" +
-                    "3. A rede permite descoberta entre dispositivos\n\n" +
+                    "3. A rede permite descoberta entre dispositivos\n" +
+                    "4. O AP/roteador não tem isolamento de clientes (\"AP isolation\")\n\n" +
                     "MAC esperado: " + mac + "\n" +
                     "SN esperado: " + sn));
                 return;
             }
             final String finalIp = ip;
-            runOnUiThread(() -> tv.setText("⏳ Câmera em " + finalIp + ", conectando DVRIP..."));
+            final String prefinal = pre.toString();
+            runOnUiThread(() -> tv.setText(prefinal + "⏳ Câmera em " + finalIp + ", conectando DVRIP..."));
+
+            // Atualiza o IP no DB se mudou
+            if (!finalIp.equals(savedIp) && mac != null && !mac.isEmpty()) {
+                updateSavedCameraIp(mac, finalIp);
+            }
 
             // Tenta admin sem senha primeiro (padrão XM); se falhar, tenta com senha do wizard
             String[] credentials = camPass.isEmpty()
@@ -1212,7 +1245,7 @@ public class MainActivity extends Activity {
                 report = r;  // mantém o último (pra mostrar erro de login se todos falharem)
             }
             final String finalReport = report != null ? report : "(diagnóstico vazio)";
-            runOnUiThread(() -> tv.setText(finalReport));
+            runOnUiThread(() -> tv.setText(prefinal + finalReport));
         });
     }
 
