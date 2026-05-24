@@ -1494,22 +1494,24 @@ public class MainActivity extends Activity {
 
     // ── Inicializa widgets do fluxo legado (escondidos) ───────────────────────
     private void initLegacyWidgets() {
-        // Estes widgets precisam existir para o código legado funcionar (modo AP, API, registro).
-        // Não são adicionados à UI por enquanto — futura expansão pode reativá-los.
-        wifiSsidInput     = input("");
-        cameraIpInput     = input("");  cameraIpInput.setText(XM_AP_IP);
-        cameraUserInput   = input("");  cameraUserInput.setText("yura");
-        cameraApPassInput = inputPass("");
-        apiUrlInput       = input("");
-        emailInput        = input("");
-        appPasswordInput  = inputPass("");
-        cameraNameInput   = input("");  cameraNameInput.setText("Câmera XM iCSee");
-        cameraLocInput    = input("");
-        schoolInput       = input("");
-        statusApi         = statusChip("Não conectado");
-        networkList       = vStack();
-        apiList           = vStack();
-        schoolList        = vStack();
+        // Estes widgets precisam existir para o código legado (modo AP, API, registro).
+        // CRÍTICO: NÃO sobrescrever campos que já foram criados por buildPageXxx() —
+        // senão os getText() apontam para inputs órfãos fora da árvore de views e
+        // sempre retornam vazio. Só preenche os que ainda são null.
+        if (wifiSsidInput     == null) wifiSsidInput     = input("");
+        if (cameraIpInput     == null) { cameraIpInput   = input(""); cameraIpInput.setText(XM_AP_IP); }
+        if (cameraUserInput   == null) { cameraUserInput = input(""); cameraUserInput.setText("yura"); }
+        if (cameraApPassInput == null) cameraApPassInput = inputPass("");
+        if (apiUrlInput       == null) apiUrlInput       = input("");
+        if (emailInput        == null) emailInput        = input("");
+        if (appPasswordInput  == null) appPasswordInput  = inputPass("");
+        if (cameraNameInput   == null) { cameraNameInput = input(""); cameraNameInput.setText("Câmera XM iCSee"); }
+        if (cameraLocInput    == null) cameraLocInput    = input("");
+        if (schoolInput       == null) schoolInput       = input("");
+        if (statusApi         == null) statusApi         = statusChip("Não conectado");
+        if (networkList       == null) networkList       = vStack();
+        if (apiList           == null) apiList           = vStack();
+        if (schoolList        == null) schoolList        = vStack();
     }
 
     private void resetWizardState() {
