@@ -3167,23 +3167,49 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * Envia frame DVRIP. Layout do header (20 bytes, little-endian),
+     * confirmado em python-dvr struct.pack("BB2xII2xHI", ...):
+     *   [0]     Head        uint8   = 0xFF
+     *   [1]     Version     uint8   = 0x01
+     *   [2-3]   Padding     2 bytes = 0x00 0x00
+     *   [4-7]   SessionID   uint32
+     *   [8-11]  PacketCount uint32
+     *   [12-13] Padding     2 bytes = 0x00 0x00
+     *   [14-15] MessageID   uint16
+     *   [16-19] DataLength  uint32
+     * Body é seguido por terminador "\n\x00" (2 bytes que entram no DataLength).
+     */
     private void dvripSend(OutputStream out, int sessionId, int seq, int msgId, byte[] body) throws Exception {
         ByteBuffer hdr = ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN);
-        hdr.put(DVRIP_MAGIC); hdr.put((byte) 0x01); hdr.put((byte) 0x00); hdr.put((byte) 0x00);
-        hdr.putInt(sessionId); hdr.putInt(seq);
-        hdr.put((byte) 0x00); hdr.put((byte) 0x00); hdr.put((byte) 0x00); hdr.put((byte) 0x00);
-        hdr.putShort((short) msgId);
-        hdr.putInt(body.length + 2);
-        out.write(hdr.array()); out.write(body); out.write('\r'); out.write('\n'); out.flush();
+        hdr.put(DVRIP_MAGIC);                // [0]    0xFF
+        hdr.put((byte) 0x01);                // [1]    version
+        hdr.put((byte) 0x00);                // [2]    padding
+        hdr.put((byte) 0x00);                // [3]    padding
+        hdr.putInt(sessionId);               // [4-7]  SessionID
+        hdr.putInt(seq);                     // [8-11] PacketCount
+        hdr.put((byte) 0x00);                // [12]   padding
+        hdr.put((byte) 0x00);                // [13]   padding
+        hdr.putShort((short) msgId);         // [14-15] MessageID
+        hdr.putInt(body.length + 2);         // [16-19] DataLength (body + tail "\n\x00")
+        out.write(hdr.array());
+        out.write(body);
+        out.write('\n');
+        out.write(0x00);
+        out.flush();
     }
 
     private JSONObject dvripRead(InputStream in) throws Exception {
         byte[] hdr = readExact(in, 20);
         ByteBuffer buf = ByteBuffer.wrap(hdr).order(ByteOrder.LITTLE_ENDIAN);
-        buf.get(); buf.get(); buf.getShort(); buf.getInt(); buf.getInt();
-        buf.get(); buf.get(); buf.get(); buf.get(); buf.getShort();
-        int bodyLen = buf.getInt();
-        if (bodyLen < 0 || bodyLen > 65536) throw new Exception("Frame DVRIP inválido");
+        // skip [0]=Head, [1]=Version, [2-3]=padding
+        buf.get(); buf.get(); buf.get(); buf.get();
+        buf.getInt();      // [4-7]  SessionID
+        buf.getInt();      // [8-11] PacketCount
+        buf.get(); buf.get(); // [12-13] padding
+        buf.getShort();    // [14-15] MessageID
+        int bodyLen = buf.getInt();  // [16-19] DataLength
+        if (bodyLen < 0 || bodyLen > 1024 * 1024) throw new Exception("Frame DVRIP inválido (len=" + bodyLen + ")");
         byte[] body = readExact(in, bodyLen);
         int end = bodyLen;
         while (end > 0 && (body[end - 1] == '\r' || body[end - 1] == '\n' || body[end - 1] == 0)) end--;
