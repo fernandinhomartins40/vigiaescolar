@@ -165,6 +165,16 @@ public class MainActivity extends Activity {
     // Receiver para bond state — usado no fluxo createBond → connectGatt
     private BroadcastReceiver bondReceiver = null;
 
+    // ─── Estado de reconnect (replica iCSee bleReconnectTimer) ───────────────
+    private int     reconnectAttempts   = 0;
+    private static final int RECONNECT_MAX_ATTEMPTS = 3;       // como iCSee: até 3 tentativas
+    private static final long RECONNECT_DELAY_MS    = 3_000L;  // 3s entre tentativas
+    private String  reconnectMac        = null;
+    private String  reconnectName       = null;
+    private boolean reconnectActive     = false;
+    private Runnable reconnectRunnable  = null;
+    private boolean authPasswordSent    = false;  // controla erro miss_token (auth não respondida)
+
     // ─── Estado API ───────────────────────────────────────────────────────────
     private volatile String  apiToken      = null;
     private volatile String  selectedSchoolId = null;
@@ -430,6 +440,7 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void startBleScan() {
+        stopReconnect();  // novo scan manual cancela reconnect em andamento
         foundDevices.clear();
         scannedDevices.clear();
         bleDeviceList.removeAllViews();
@@ -609,6 +620,13 @@ public class MainActivity extends Activity {
         bleConnected = false;
         connectedDevSn = null;
         connectedMac = mac;
+        authPasswordSent = false;
+        // Guarda dados para o reconnect timer (replica iCSee bleReconnectTimer)
+        if (!reconnectActive) {
+            reconnectMac      = mac;
+            reconnectName     = name;
+            reconnectAttempts = 0;
+        }
 
         logBle("Conectando em " + name + " (" + mac + ")...");
         setChip(statusBle, "Parando scan...", COLOR_BLUE_MED);
@@ -678,13 +696,51 @@ public class MainActivity extends Activity {
             if (!bleConnected && bleGatt != null) {
                 logBle("✗ Timeout 30s — onConnectionStateChange nunca chamado.");
                 logBle("   deviceType=" + device.getType() + " mac=" + device.getAddress());
-                logBle("   → Coloque a câmera em modo BLE (LED piscando) e tente novamente");
-                setChip(statusBle, "Timeout — tente novamente", Color.rgb(185, 28, 28));
                 bleConnecting = false;
                 try { bleGatt.disconnect(); bleGatt.close(); } catch (Exception ignored) {}
                 bleGatt = null;
+                scheduleReconnect("timeout 30s connectGatt");
             }
         }, 30_000);
+    }
+
+    // ─── Reconnect timer (replica iCSee bleReconnectTimer) ─────────────────────
+    // O iCSee reagenda até 3 tentativas de connectGatt em caso de falha — strings
+    // "reconnect Timer start" e "close bleReconnectTimer" no bytecode confirmam.
+    private void scheduleReconnect(String reason) {
+        if (reconnectMac == null) return;
+        if (reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+            logBle("✗ Reconnect: limite de " + RECONNECT_MAX_ATTEMPTS + " tentativas atingido (" + reason + ")");
+            setChip(statusBle, "Falha após " + RECONNECT_MAX_ATTEMPTS + " tentativas", Color.rgb(185, 28, 28));
+            stopReconnect();
+            return;
+        }
+        reconnectAttempts++;
+        reconnectActive = true;
+        logBle("⟳ reconnect Timer start — tentativa " + reconnectAttempts + "/" + RECONNECT_MAX_ATTEMPTS + " em " + (RECONNECT_DELAY_MS/1000) + "s (" + reason + ")");
+        setChip(statusBle, "Reconectando (" + reconnectAttempts + "/" + RECONNECT_MAX_ATTEMPTS + ")", COLOR_BLUE_MED);
+        if (reconnectRunnable != null) mainHandler.removeCallbacks(reconnectRunnable);
+        final String mac = reconnectMac;
+        final String name = reconnectName;
+        reconnectRunnable = () -> {
+            if (!reconnectActive) return;
+            bleConnecting = false;  // libera flag para connectBleDevice prosseguir
+            bleConnected  = false;
+            connectBleDevice(mac, name);
+        };
+        mainHandler.postDelayed(reconnectRunnable, RECONNECT_DELAY_MS);
+    }
+
+    private void stopReconnect() {
+        if (reconnectActive) logBle("close bleReconnectTimer");
+        reconnectActive   = false;
+        reconnectAttempts = 0;
+        reconnectMac      = null;
+        reconnectName     = null;
+        if (reconnectRunnable != null) {
+            mainHandler.removeCallbacks(reconnectRunnable);
+            reconnectRunnable = null;
+        }
     }
 
     // Limpa o cache de serviços GATT via reflection — workaround usado pelo iCSee/BluetoothKit
@@ -701,6 +757,7 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void disconnectBle() {
+        stopReconnect();  // disconnect manual cancela timer de reconnect
         if (bleGatt != null) {
             try { bleGatt.disconnect(); } catch (Exception ignored) {}
             // fecha após pequeno delay para o stack BLE processar o disconnect
@@ -721,19 +778,19 @@ public class MainActivity extends Activity {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 int s = status;
                 String hint = s == 133 ? " (câmera saiu do modo BLE — reinicie-a)" : s == 8 ? " (sinal perdido)" : "";
-                runOnUiThread(() -> {
-                    logBle("✗ Erro de conexão BLE status=" + s + hint);
-                    setChip(statusBle, "Erro " + s + hint, Color.rgb(185, 28, 28));
-                });
+                runOnUiThread(() -> logBle("✗ connectBLEFailed status=" + s + hint));
                 try { gatt.close(); } catch (Exception ignored) {}
                 if (bleGatt == gatt) bleGatt = null;
-                bleConnected = false;
+                bleConnected  = false;
                 bleConnecting = false;
+                // iCSee dispatcha error_code_str="connectBLEFailed" → reagenda reconnect
+                runOnUiThread(() -> scheduleReconnect("status=" + s));
                 return;
             }
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 bleConnecting = false;
-                bleConnected = true;
+                bleConnected  = true;
+                stopReconnect();  // sucesso → cancela timer de reconnect
                 runOnUiThread(() -> logBle("✓ STATE_CONNECTED! Limpando cache GATT e solicitando MTU..."));
                 refreshDeviceCache(gatt);
                 mainHandler.postDelayed(() -> {
@@ -742,14 +799,22 @@ public class MainActivity extends Activity {
                     }
                 }, 200);
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                bleConnected = false;
+                boolean wasConnected = bleConnected;
+                bleConnected  = false;
                 bleConnecting = false;
-                runOnUiThread(() -> {
-                    logBle("BLE desconectado.");
-                    setChip(statusBle, "Desconectado", COLOR_MUTED);
-                });
+                runOnUiThread(() -> logBle("BLE desconectado."));
                 try { gatt.close(); } catch (Exception ignored) {}
                 if (bleGatt == gatt) bleGatt = null;
+                // Se a câmera desconectar antes do auth completar, é falha de pareamento
+                // (iCSee mostra "TR_Blue_pairing_failed_miss_token"). Reagenda reconnect.
+                if (wasConnected && !authPasswordSent) {
+                    runOnUiThread(() -> {
+                        logBle("⚠ TR_Blue_pairing_failed_miss_token — desconectou antes do auth");
+                        scheduleReconnect("disconnect antes do auth");
+                    });
+                } else {
+                    runOnUiThread(() -> setChip(statusBle, "Desconectado", COLOR_MUTED));
+                }
             }
         }
 
@@ -891,6 +956,7 @@ public class MainActivity extends Activity {
         byte[] frame   = buildBleFrame(FUN_AUTH_REQ, payload);
 
         logBle("→ AUTH token=" + token.substring(0, Math.min(token.length(), 16)) + "... SN=" + (devSn.isEmpty() ? "(aguardando)" : devSn));
+        authPasswordSent = true;  // marca que entrou no fluxo de auth (evita reconnect miss_token)
         writeBluetoothChar(gatt, frame);
     }
 
