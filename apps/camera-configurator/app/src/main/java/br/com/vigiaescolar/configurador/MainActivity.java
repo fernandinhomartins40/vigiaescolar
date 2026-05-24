@@ -947,10 +947,10 @@ public class MainActivity extends Activity {
             return;
         }
 
-        // Valores exatos confirmados pela análise do APK original (SDK_NetWifiConfig)
-        String encrypType = wifiPass.isEmpty() ? "OPEN"    : "WPA2PSK";
+        // Valores confirmados na decompilação do APK iCSee v7.1.1 — usa "WPA2" e não "WPA2PSK"
+        String encrypType = wifiPass.isEmpty() ? "OPEN"    : "WPA2";
         String keyType    = wifiPass.isEmpty() ? "NONE"    : "AES";
-        String auth       = wifiPass.isEmpty() ? "OPEN"    : "WPA2PSK";
+        String auth       = wifiPass.isEmpty() ? "OPEN"    : "WPA2";
 
         try {
             JSONObject wifi = new JSONObject();
