@@ -175,6 +175,12 @@ public class MainActivity extends Activity {
     // faz proxy_pass para 127.0.0.1:7003 (vigiaescolar-nginx-1) e dele para o
     // container vigiaescolar-api-1.
     private static final String API_BASE_URL = "https://vigiaescolar.com.br/api";
+    // Host do servidor RTMP/MediaMTX para ingest do stream das câmeras
+    // (firmware OpenIPC faz push para rtmp://<HOST>:1935/live/<serialNumber>).
+    // Mesmo domínio da API — o nginx da VPS faz proxy para o container mediamtx.
+    private static final String MEDIA_HOST = "vigiaescolar.com.br";
+    private static final int    RTMP_PORT  = 1935;
+    private static final int    RTSP_PORT  = 8554;
     private static final int[]  API_PORTS   = {3001, 7003, 80, 8080};   // legacy LAN discovery
     private static final int[]  SCAN_PORTS  = {34567, 554, 34571, 8554};
 
@@ -1116,7 +1122,98 @@ public class MainActivity extends Activity {
 
         card.addView(btnRow);
 
+        // Botão de diagnóstico técnico — leitura SEGURA da câmera via DVRIP.
+        // Usado para confirmar SoC/hardware antes do upgrade OpenIPC.
+        Button diagBtn = new Button(this);
+        diagBtn.setText("🔧 Diagnóstico técnico (Etapa 1)");
+        diagBtn.setAllCaps(false);
+        diagBtn.setTextSize(12);
+        diagBtn.setTextColor(COLOR_BLUE_MED);
+        diagBtn.setBackground(rounded(Color.rgb(219, 234, 254), Color.rgb(147, 197, 253), 8));
+        diagBtn.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout.LayoutParams diagParams = matchWrap(0, dp(8), 0, 0);
+        diagBtn.setLayoutParams(diagParams);
+        diagBtn.setOnClickListener(v -> runDiagnosticOnCamera(cam));
+        card.addView(diagBtn);
+
         return card;
+    }
+
+    /**
+     * Etapa 1 do roadmap OpenIPC: chama dvripDiagnostic e mostra resultado num
+     * dialog rolável + botão "Copiar relatório" para o usuário enviar para
+     * análise. NÃO escreve nada na câmera — só lê info.
+     */
+    private void runDiagnosticOnCamera(final JSONObject cam) {
+        final String name = cam.optString("name", "Câmera");
+        final String mac  = cam.optString("mac", "");
+        final String sn   = cam.optString("sn", "");
+        final String savedIp = cam.optString("ip", "");
+        final String camPass = cameraPassInput != null ? cameraPassInput.getText().toString().trim() : "";
+
+        // Container do dialog
+        final android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this);
+        b.setTitle("Diagnóstico — " + name);
+
+        final ScrollView sv = new ScrollView(this);
+        final TextView tv = new TextView(this);
+        tv.setText("⏳ Procurando câmera na rede e coletando informações...\n\nEsse processo leva 5-30 segundos.");
+        tv.setTextSize(11);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setPadding(dp(16), dp(12), dp(16), dp(12));
+        tv.setTextIsSelectable(true);
+        sv.addView(tv);
+        b.setView(sv);
+
+        b.setPositiveButton("Copiar relatório", (d, w) -> {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                    "Diagnóstico " + name, tv.getText().toString()));
+                toast("Relatório copiado");
+            }
+        });
+        b.setNegativeButton("Fechar", null);
+        final android.app.AlertDialog dialog = b.create();
+        dialog.show();
+
+        // Diagnóstico em background
+        pool.execute(() -> {
+            String ip = savedIp;
+            if (ip == null || ip.isEmpty()) ip = findCameraIpOnLan(sn, mac);
+            if (ip == null || ip.isEmpty()) {
+                runOnUiThread(() -> tv.setText(
+                    "✗ Câmera não encontrada na rede.\n\n" +
+                    "Verifique que:\n" +
+                    "1. O celular está conectado no MESMO Wi-Fi que a câmera\n" +
+                    "2. A câmera está ligada e com LED fixo (conectada)\n" +
+                    "3. A rede permite descoberta entre dispositivos\n\n" +
+                    "MAC esperado: " + mac + "\n" +
+                    "SN esperado: " + sn));
+                return;
+            }
+            final String finalIp = ip;
+            runOnUiThread(() -> tv.setText("⏳ Câmera em " + finalIp + ", conectando DVRIP..."));
+
+            // Tenta admin sem senha primeiro (padrão XM); se falhar, tenta com senha do wizard
+            String[] credentials = camPass.isEmpty()
+                ? new String[]{"admin", ""}
+                : new String[]{"admin", camPass, "admin", ""};
+            String report = null;
+            for (int i = 0; i < credentials.length; i += 2) {
+                String user = credentials[i];
+                String pass = credentials[i + 1];
+                String r = dvripDiagnostic(finalIp, user, pass);
+                if (r.contains("[1] LOGIN") && !r.contains("✗ Login falhou")) {
+                    report = r;
+                    break;
+                }
+                report = r;  // mantém o último (pra mostrar erro de login se todos falharem)
+            }
+            final String finalReport = report != null ? report : "(diagnóstico vazio)";
+            runOnUiThread(() -> tv.setText(finalReport));
+        });
     }
 
     private void showRemoveDialog(final JSONObject cam) {
@@ -1590,6 +1687,14 @@ public class MainActivity extends Activity {
     }
 
     /** Faz PATCH (ou re-POST com upsert) na API para atualizar IP/streamUrl. */
+    /**
+     * Caminho legado: usado quando a câmera AINDA tem firmware Xiongmai
+     * original (sem OpenIPC). Nesse caso o gateway VPS não consegue alcançar
+     * o IP local — mas mantemos o registro caso um gateway local da escola
+     * (raspberry pi) seja adicionado depois. Câmeras com OpenIPC já foram
+     * cadastradas com URL rtsp://vigiaescolar.com.br:8554/live/<SN> e este
+     * método não toca nelas.
+     */
     private void pushCameraIpToServer(final String mac, final String ip) {
         if (apiToken == null || apiToken.isEmpty() || mac == null || mac.isEmpty()) return;
         final String apiUrl = API_BASE_URL;
@@ -2874,6 +2979,133 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * Etapa 1 do roadmap OpenIPC: leitura SEGURA de info da câmera via DVRIP.
+     * Nada é escrito. Roda vários GetConfig/SystemInfo e devolve dump completo
+     * para análise manual da identificação de SoC, modelo e capacidades.
+     *
+     * Comandos executados:
+     *  - SystemInfo                        (msg 1020)  → hardware, software, SoC
+     *  - StorageInfo                       (msg 1024)  → flash size/partitions
+     *  - NetWork.NetCommon                 (msg 1042)  → MAC, IP, gateway
+     *  - General                           (msg 1042)  → timezone, language
+     *  - OPMachine Action=GetMachineInfo   (msg 1450)  → info adicional
+     *  - Uart.Comm                         (msg 1042)  → bauds, devicemode
+     *  - Ability.SystemFunction            (msg 1360)  → funções suportadas
+     *
+     * Retorna o relatório como String multi-linha pronto pra copy/paste.
+     */
+    private String dvripDiagnostic(String ip, String user, String pass) {
+        StringBuilder report = new StringBuilder();
+        report.append("=== DIAGNÓSTICO DVRIP ===\n");
+        report.append("IP: ").append(ip).append("\n");
+        report.append("Usuário: ").append(user).append("\n");
+        report.append("Data: ").append(formatDate(System.currentTimeMillis())).append("\n");
+        report.append("\n");
+
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(ip, DVRIP_PORT), 4000);
+            s.setSoTimeout(8000);
+            InputStream in = s.getInputStream();
+            OutputStream out = s.getOutputStream();
+
+            // 1. Login
+            JSONObject login = new JSONObject();
+            login.put("EncryptType", "MD5");
+            login.put("LoginType", "DVRIP-Web");
+            login.put("PassWord", dvripMd5(pass));
+            login.put("UserName", user);
+            login.put("SessionID", "0x0000000000");
+            dvripSend(out, 0, seqNo.getAndIncrement(), MSG_LOGIN, login.toString().getBytes(StandardCharsets.UTF_8));
+
+            JSONObject loginRsp = dvripRead(in);
+            int ret = loginRsp.optInt("Ret", -1);
+            report.append("[1] LOGIN\n");
+            report.append("    Ret: ").append(ret).append("\n");
+            if (ret != DVRIP_OK && ret != 101) {
+                report.append("    ✗ Login falhou — diagnóstico interrompido\n");
+                report.append("    Tente outra senha (ex: vazia, '666666', 'tlJwpbo6').\n");
+                return report.toString();
+            }
+            String sid = loginRsp.optString("SessionID", "0x0");
+            int sessionInt = parseHex(sid);
+            report.append("    SessionID: ").append(sid).append("\n");
+            report.append("    Resposta completa: ").append(loginRsp.toString()).append("\n");
+            report.append("\n");
+
+            // 2. SystemInfo
+            dvripQueryAndAppend(report, in, out, sessionInt, 1020, "SystemInfo");
+
+            // 3. StorageInfo (algumas firmwares retornam Ret=102 se sem SD card — ok)
+            dvripQueryAndAppend(report, in, out, sessionInt, 1024, "StorageInfo");
+
+            // 4. NetWork.NetCommon — MAC, IP, gateway
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "NetWork.NetCommon");
+
+            // 5. General — timezone, language, hardware version
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "General");
+
+            // 6. OPMachine GetMachineInfo
+            try {
+                JSONObject getMachine = new JSONObject();
+                getMachine.put("Name", "OPMachine");
+                getMachine.put("SessionID", sid);
+                JSONObject opm = new JSONObject();
+                opm.put("Action", "GetMachineInfo");
+                getMachine.put("OPMachine", opm);
+                dvripSend(out, sessionInt, seqNo.getAndIncrement(), 1450, getMachine.toString().getBytes(StandardCharsets.UTF_8));
+                JSONObject rsp = dvripRead(in);
+                report.append("[6] OPMachine GetMachineInfo (msg 1450)\n");
+                report.append("    Ret: ").append(rsp.optInt("Ret", -1)).append("\n");
+                report.append("    Resposta: ").append(rsp.toString()).append("\n\n");
+            } catch (Exception e) {
+                report.append("[6] OPMachine GetMachineInfo: ERRO ").append(e.getMessage()).append("\n\n");
+            }
+
+            // 7. Ability.SystemFunction — funções suportadas pelo firmware
+            try {
+                JSONObject req = new JSONObject();
+                req.put("Name", "SystemFunction");
+                req.put("SessionID", sid);
+                dvripSend(out, sessionInt, seqNo.getAndIncrement(), 1360, req.toString().getBytes(StandardCharsets.UTF_8));
+                JSONObject rsp = dvripRead(in);
+                report.append("[7] Ability.SystemFunction (msg 1360)\n");
+                report.append("    Ret: ").append(rsp.optInt("Ret", -1)).append("\n");
+                report.append("    Resposta: ").append(rsp.toString()).append("\n\n");
+            } catch (Exception e) {
+                report.append("[7] Ability.SystemFunction: ERRO ").append(e.getMessage()).append("\n\n");
+            }
+
+            // 8. Uart.Comm — info de portas seriais (ajuda identificar se tem TTL exposto)
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "Uart.Comm");
+
+            // 9. fVideo.OSDInfo — versão de firmware visível no OSD
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "fVideo.OSDInfo");
+
+        } catch (Exception e) {
+            report.append("\n✗ Erro de conexão DVRIP: ").append(e.getMessage()).append("\n");
+        }
+        report.append("=== FIM DIAGNÓSTICO ===\n");
+        return report.toString();
+    }
+
+    /** Helper: faz GetConfig de um Name específico via msgId 1042 e anexa ao relatório. */
+    private void dvripQueryAndAppend(StringBuilder report, InputStream in, OutputStream out,
+                                     int sessionInt, int msgId, String name) {
+        try {
+            JSONObject req = new JSONObject();
+            req.put("Name", name);
+            req.put("SessionID", String.format("0x%08X", sessionInt));
+            dvripSend(out, sessionInt, seqNo.getAndIncrement(), msgId, req.toString().getBytes(StandardCharsets.UTF_8));
+            JSONObject rsp = dvripRead(in);
+            report.append("[Q] ").append(name).append(" (msg ").append(msgId).append(")\n");
+            report.append("    Ret: ").append(rsp.optInt("Ret", -1)).append("\n");
+            report.append("    Resposta: ").append(rsp.toString()).append("\n\n");
+        } catch (Exception e) {
+            report.append("[Q] ").append(name).append(": ERRO ").append(e.getMessage()).append("\n\n");
+        }
+    }
+
     private void dvripSend(OutputStream out, int sessionId, int seq, int msgId, byte[] body) throws Exception {
         ByteBuffer hdr = ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN);
         hdr.put(DVRIP_MAGIC); hdr.put((byte) 0x01); hdr.put((byte) 0x00); hdr.put((byte) 0x00);
@@ -3158,11 +3390,18 @@ public class MainActivity extends Activity {
 
         final String finalIp  = ip;
         final String finalLoc = loc.isEmpty() ? "Configurada via APK" : loc;
-        // Senha da câmera fica nas credenciais — URL usa placeholder padrão XM
         final String camPass = cameraPassInput.getText().toString().trim();
-        final String rtspUrl = ip.equals("DHCP")
-            ? "rtsp://CAMERA_IP:554/user=admin_password=" + camPass + "_channel=1_stream=0.sdp?real_stream"
-            : "rtsp://" + ip + ":554/user=admin_password=" + camPass + "_channel=1_stream=0.sdp?real_stream";
+
+        // URL do stream cadastrada no painel: aponta para MediaMTX na VPS,
+        // não para o IP local da câmera. A câmera (firmware OpenIPC) faz
+        // RTMP push para a VPS e o MediaMTX republica em RTSP para o
+        // face-server consumir. Stream key = serialNumber.
+        // Fallback: se não temos SN ainda, registra com placeholder e a
+        // câmera fica "pendente" até o backend receber a primeira publish.
+        final String sn = connectedDevSn != null ? connectedDevSn.replaceAll("[^A-Za-z0-9_-]", "") : "";
+        final String rtspUrl = sn.isEmpty()
+            ? "rtsp://" + MEDIA_HOST + ":" + RTSP_PORT + "/live/PENDING_SN"
+            : "rtsp://" + MEDIA_HOST + ":" + RTSP_PORT + "/live/" + sn;
 
         pool.execute(() -> {
             try {
@@ -3172,11 +3411,14 @@ public class MainActivity extends Activity {
                 payload.put("localizacao", finalLoc);
                 payload.put("tipo", "RTSP");
                 payload.put("url", rtspUrl);
-                payload.put("porta", 554);
+                payload.put("porta", RTSP_PORT);  // 8554 do MediaMTX
                 payload.put("resolucao", "1080p");
                 payload.put("fps", 30);
                 payload.put("status", "Ativa");
-                payload.put("usuario", "admin");  // padrão XM, não yura
+                // Câmera com firmware OpenIPC não usa user/senha no stream
+                // (auth fica embutida na URL RTMP publicada pela câmera).
+                // Mantém o campo para compatibilidade com câmeras XM legadas.
+                payload.put("usuario", "admin");
                 payload.put("senha", camPass);
                 // Identificadores físicos — permitem ressincronização após reinstalação
                 if (selectedCameraMac != null && !selectedCameraMac.isEmpty()) {
