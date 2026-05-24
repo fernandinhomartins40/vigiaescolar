@@ -675,8 +675,7 @@ public class MainActivity extends Activity {
         page.addView(gap(primaryBtn("Cadastrar no VigiaEscolar", v -> {
             // Vai para login se ainda não autenticou, senão direto pro cadastro
             if (apiToken == null || apiToken.isEmpty()) {
-                showStep(WIZ_LOGIN);
-                if (apiUrlInput.getText().toString().trim().isEmpty()) discoverApis();
+                openLoginPage();
             } else {
                 showStep(WIZ_REGISTER);
             }
@@ -691,37 +690,47 @@ public class MainActivity extends Activity {
     }
 
     // ── Página 6: Login VigiaEscolar ──────────────────────────────────────────
+    private Button loginEntrarBtn;
+    private TextView loginApiStatusLabel;
+
     private View buildPageLogin() {
         LinearLayout page = wizardPage();
 
         page.addView(wizardHeading("Entrar no VigiaEscolar"));
-        page.addView(muted("Use o mesmo e-mail e senha do painel web. A URL da API é detectada automaticamente na rede local."));
+        page.addView(muted("Use o mesmo e-mail e senha do painel web. A URL do servidor é detectada automaticamente."));
 
-        // Inputs visíveis (sobrescrevem os do initLegacyWidgets)
-        apiUrlInput = input("http://192.168.x.x:3001/api");
-        emailInput = input("email@escola.com");
-        appPasswordInput = inputPass("Senha do painel");
+        // URL é hidden — só usada internamente. Mantida para reuso de loginApi().
+        apiUrlInput = input("");
+        emailInput = inputEmail("seu@email.com");
+        appPasswordInput = inputPass("Sua senha");
 
-        // Carrega valores salvos do SharedPreferences
+        // Pré-preenche e-mail salvo
         android.content.SharedPreferences prefs = getSharedPreferences("vigiaescolar", MODE_PRIVATE);
         apiUrlInput.setText(prefs.getString("api_url", ""));
         emailInput.setText(prefs.getString("api_email", ""));
 
-        page.addView(gap(secondaryBtn("Detectar API na rede", v -> discoverApis()), dp(14)));
-        apiList = vStack();
-        page.addView(gap(apiList, dp(4)));
-
-        page.addView(field("URL da API", apiUrlInput));
-        page.addView(field("E-mail", emailInput));
+        page.addView(gap(field("E-mail", emailInput), dp(14)));
         page.addView(field("Senha", appPasswordInput));
 
+        // Indicador de status da detecção da API (mensagem clara, não chip)
+        loginApiStatusLabel = tv("⏳ Buscando servidor VigiaEscolar...", 12, COLOR_MUTED, false);
+        loginApiStatusLabel.setPadding(dp(4), dp(14), dp(4), 0);
+        page.addView(loginApiStatusLabel);
+
+        // Botão statusApi escondido — preserva referência para loginApi() existente
         statusApi = statusChip("Não conectado");
-        page.addView(gap(statusApi, dp(10)));
+        statusApi.setVisibility(View.GONE);
+        page.addView(statusApi);
+
+        // apiList escondido também (auto-seleciona a 1ª API)
+        apiList = vStack();
+        apiList.setVisibility(View.GONE);
+        page.addView(apiList);
 
         // Botões: Voltar / Entrar
         LinearLayout btnRow = new LinearLayout(this);
         btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        btnRow.setLayoutParams(matchWrap(0, dp(18), 0, 0));
+        btnRow.setLayoutParams(matchWrap(0, dp(22), 0, 0));
 
         Button backBtn = secondaryBtn("Voltar", v -> showStep(WIZ_SUCCESS));
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -729,22 +738,78 @@ public class MainActivity extends Activity {
         backBtn.setLayoutParams(bp);
         btnRow.addView(backBtn);
 
-        Button loginBtn = primaryBtn("Entrar", v -> {
-            // Salva credenciais (não a senha) antes de tentar login
-            android.content.SharedPreferences.Editor ed = getSharedPreferences("vigiaescolar", MODE_PRIVATE).edit();
-            ed.putString("api_url", apiUrlInput.getText().toString().trim());
-            ed.putString("api_email", emailInput.getText().toString().trim());
-            ed.apply();
+        loginEntrarBtn = primaryBtn("Entrar", v -> {
+            String email = emailInput.getText().toString().trim();
+            String pass  = appPasswordInput.getText().toString().trim();
+            String url   = apiUrlInput.getText().toString().trim();
+            if (email.isEmpty() || pass.isEmpty()) { toast("Preencha e-mail e senha"); return; }
+            if (url.isEmpty()) { toast("Aguarde a detecção do servidor..."); return; }
+            // Salva e-mail (não a senha)
+            getSharedPreferences("vigiaescolar", MODE_PRIVATE).edit()
+                .putString("api_url", url)
+                .putString("api_email", email)
+                .apply();
             loginApiAndAdvance();
         });
+        // Inicia desabilitado até detectar a API
+        loginEntrarBtn.setEnabled(false);
+        loginEntrarBtn.setAlpha(0.5f);
         LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         cp.leftMargin = dp(6);
-        loginBtn.setLayoutParams(cp);
-        btnRow.addView(loginBtn);
+        loginEntrarBtn.setLayoutParams(cp);
+        btnRow.addView(loginEntrarBtn);
 
         page.addView(btnRow);
 
+        // Link discreto para casos raros onde a auto-detecção falha
+        Button manualBtn = new Button(this);
+        manualBtn.setText("Endereço do servidor não foi detectado?");
+        manualBtn.setAllCaps(false);
+        manualBtn.setTextColor(COLOR_BLUE_MED);
+        manualBtn.setBackgroundColor(Color.TRANSPARENT);
+        manualBtn.setTextSize(12);
+        manualBtn.setOnClickListener(v -> showManualApiUrlDialog());
+        page.addView(gap(manualBtn, dp(14)));
+
         return wizardScrollPage(page);
+    }
+
+    private EditText inputEmail(String hint) {
+        EditText e = input(hint);
+        e.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+            | android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+        return e;
+    }
+
+    private void showManualApiUrlDialog() {
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this);
+        b.setTitle("Servidor VigiaEscolar");
+        b.setMessage("Informe o endereço completo do servidor (ex: http://192.168.1.10:3001/api)");
+        final EditText et = input("http://192.168.x.x:3001/api");
+        et.setText(apiUrlInput.getText().toString());
+        LinearLayout wrap = vStack();
+        wrap.setPadding(dp(18), dp(8), dp(18), 0);
+        wrap.addView(et);
+        b.setView(wrap);
+        b.setPositiveButton("Salvar", (d, w) -> {
+            String url = et.getText().toString().trim().replaceAll("/$", "");
+            if (url.isEmpty()) { toast("Endereço inválido"); return; }
+            apiUrlInput.setText(url);
+            updateLoginApiStatus("✓ Servidor configurado manualmente: " + url, COLOR_GREEN, true);
+        });
+        b.setNegativeButton("Cancelar", null);
+        b.show();
+    }
+
+    private void updateLoginApiStatus(String text, int color, boolean enableLogin) {
+        if (loginApiStatusLabel != null) {
+            loginApiStatusLabel.setText(text);
+            loginApiStatusLabel.setTextColor(color);
+        }
+        if (loginEntrarBtn != null) {
+            loginEntrarBtn.setEnabled(enableLogin);
+            loginEntrarBtn.setAlpha(enableLogin ? 1f : 0.5f);
+        }
     }
 
     // ── Página 7: Cadastrar câmera ────────────────────────────────────────────
@@ -813,7 +878,7 @@ public class MainActivity extends Activity {
     private void registerCameraFromWizard() {
         if (apiToken == null || apiToken.isEmpty()) {
             toast("Faça login primeiro");
-            showStep(WIZ_LOGIN);
+            openLoginPage();
             return;
         }
         if (selectedSchoolId == null || selectedSchoolId.isEmpty()) {
@@ -2416,11 +2481,52 @@ public class MainActivity extends Activity {
                     if (apiList != null) apiList.addView(b);
                     if (apiUrlInput.getText().toString().trim().isEmpty()) {
                         apiUrlInput.setText(url);
-                        toast("API detectada: " + url);
                     }
+                    // Habilita o botão Entrar e atualiza o label de status
+                    updateLoginApiStatus("✓ Servidor encontrado: " + url, COLOR_GREEN, true);
                 });
             }
         } catch (Exception ignored) {}
+    }
+
+    /** Abre tela de login e dispara auto-detecção da API em background. */
+    private void openLoginPage() {
+        showStep(WIZ_LOGIN);
+        // Se já tinha URL salva, valida ela primeiro; senão varre a subnet
+        String savedUrl = apiUrlInput != null ? apiUrlInput.getText().toString().trim() : "";
+        if (!savedUrl.isEmpty()) {
+            updateLoginApiStatus("⏳ Verificando servidor salvo...", COLOR_MUTED, false);
+            pool.execute(() -> {
+                try {
+                    HttpURLConnection c = (HttpURLConnection) new URL(savedUrl + "/health").openConnection();
+                    c.setRequestMethod("GET"); c.setConnectTimeout(1500); c.setReadTimeout(1500);
+                    if (c.getResponseCode() < 300 && readStream(c.getInputStream()).contains("vigiaescolar-api")) {
+                        runOnUiThread(() -> updateLoginApiStatus("✓ Servidor encontrado: " + savedUrl, COLOR_GREEN, true));
+                        return;
+                    }
+                } catch (Exception ignored) {}
+                // URL salva não respondeu → tenta auto-detect
+                runOnUiThread(this::autoDetectApiOnLogin);
+            });
+        } else {
+            autoDetectApiOnLogin();
+        }
+    }
+
+    private void autoDetectApiOnLogin() {
+        updateLoginApiStatus("⏳ Procurando servidor VigiaEscolar na rede...", COLOR_MUTED, false);
+        // Limpa URL antiga para não ficar marcada como válida durante o probe
+        if (apiUrlInput != null) apiUrlInput.setText("");
+        discoverApis();
+        // Se em 10s não achou nada, mostra mensagem com sugestão manual
+        mainHandler.postDelayed(() -> {
+            if (currentStep == WIZ_LOGIN
+                    && (apiUrlInput == null || apiUrlInput.getText().toString().trim().isEmpty())) {
+                updateLoginApiStatus(
+                    "⚠ Servidor não encontrado automaticamente.\nToque em \"Endereço do servidor não foi detectado?\"",
+                    Color.rgb(185, 28, 28), false);
+            }
+        }, 10_000);
     }
 
     private void loginApi() {
