@@ -77,9 +77,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Protocolo BLE XM (engenharia reversa do APK iCSee v7.1.1):
  *
  *  Service UUID:    00001910-0000-1000-8000-00805f9b34fb
- *  Write Char:      00002b10-0000-1000-8000-00805f9b34fb  (app → câmera)
- *  Notify Char:     00002b11-0000-1000-8000-00805f9b34fb  (câmera → app)
+ *  Notify Char:     00002b10-0000-1000-8000-00805f9b34fb  (câmera → app, registra notify)
+ *  Write Char:      00002b11-0000-1000-8000-00805f9b34fb  (app → câmera, comandos)
  *  CCCD Descriptor: 00002902-0000-1000-8000-00805f9b34fb
+ *
+ *  CORREÇÃO (engenharia reversa e.n.d.c v7.1.1): o iCSee REGISTRA notify em 2b10
+ *  (não 2b11 como assumimos antes) e ESCREVE em 2b11. Nosso log anterior mostrou
+ *  2b11 com props=0x8 (WRITE) — confirma a inversão.
  *
  *  Frame BLE: [HEAD:1B 0xAB] [FUN_ID:1B] [LEN:2B LE] [CHECKSUM:1B] [DATA:N bytes]
  *  FUN_ID:  0x01=AUTH_REQ, 0x02=AUTH_RSP, 0x03=WIFI_CFG, 0x04=WIFI_RSP, 0x05=DEV_INFO
@@ -103,8 +107,9 @@ public class MainActivity extends Activity {
 
     // ─── UUIDs BLE XM ─────────────────────────────────────────────────────────
     private static final UUID UUID_SERVICE  = UUID.fromString("00001910-0000-1000-8000-00805f9b34fb");
-    private static final UUID UUID_WRITE    = UUID.fromString("00002b10-0000-1000-8000-00805f9b34fb");
-    private static final UUID UUID_NOTIFY   = UUID.fromString("00002b11-0000-1000-8000-00805f9b34fb");
+    // INVERTIDO em relação ao que assumimos antes (validado em e.n.d.c.a no iCSee dex)
+    private static final UUID UUID_NOTIFY   = UUID.fromString("00002b10-0000-1000-8000-00805f9b34fb");
+    private static final UUID UUID_WRITE    = UUID.fromString("00002b11-0000-1000-8000-00805f9b34fb");
     private static final UUID UUID_CCCD     = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
     // ─── FunID BLE ────────────────────────────────────────────────────────────
@@ -892,7 +897,25 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> logBle("Serviço XM 0x1910 encontrado. Habilitando notificações..."));
             bleConnected = true;
 
-            // Passo 3: habilitar notify em 0x2b11
+            // Loga TODAS chars do serviço 0x1910 com suas props para diagnóstico
+            // PROPERTY_BROADCAST=0x01 READ=0x02 WRITE_NO_RESP=0x04 WRITE=0x08
+            // NOTIFY=0x10 INDICATE=0x20 SIGNED_WRITE=0x40
+            StringBuilder cs = new StringBuilder("Chars do serviço 0x1910:");
+            for (BluetoothGattCharacteristic c : svc.getCharacteristics()) {
+                int p = c.getProperties();
+                cs.append("\n  ").append(c.getUuid())
+                  .append(" props=0x").append(Integer.toHexString(p))
+                  .append(" [")
+                  .append((p & 0x02) != 0 ? "R" : "")
+                  .append((p & 0x04) != 0 ? "Wn" : "")
+                  .append((p & 0x08) != 0 ? "W" : "")
+                  .append((p & 0x10) != 0 ? "N" : "")
+                  .append((p & 0x20) != 0 ? "I" : "")
+                  .append("]");
+            }
+            runOnUiThread(() -> logBle(cs.toString()));
+
+            // Passo 3: habilitar notify em 0x2b10 (a char com PROPERTY_NOTIFY)
             BluetoothGattCharacteristic notifyChar = svc.getCharacteristic(UUID_NOTIFY);
             if (notifyChar == null) {
                 StringBuilder sb = new StringBuilder();
