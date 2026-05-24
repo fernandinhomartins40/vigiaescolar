@@ -160,6 +160,8 @@ public class MainActivity extends Activity {
     private static final byte   DVRIP_MAGIC = (byte) 0xFF;
     private static final int    MSG_LOGIN   = 1000;
     private static final int    MSG_SET_CFG = 1040;
+    private static final int    MSG_DEFAULT_CFG = 1042; // OPDefaultConfig — reset de fábrica
+    private static final int    MSG_REBOOT  = 1450;     // OPMachine Reboot
     private static final int    DVRIP_OK    = 100;
 
     // ─── API VigiaEscolar ─────────────────────────────────────────────────────
@@ -998,11 +1000,7 @@ public class MainActivity extends Activity {
         refreshBtn.setLayoutParams(bp);
         btnRow.addView(refreshBtn);
 
-        Button delBtn = secondaryBtn("Remover", v -> {
-            deleteCamera(mac);
-            renderMyCameras();
-            toast("Câmera removida");
-        });
+        Button delBtn = secondaryBtn("Remover", v -> showRemoveDialog(cam));
         LinearLayout.LayoutParams dpp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         dpp.leftMargin = dp(6);
         delBtn.setLayoutParams(dpp);
@@ -1011,6 +1009,107 @@ public class MainActivity extends Activity {
         card.addView(btnRow);
 
         return card;
+    }
+
+    private void showRemoveDialog(final JSONObject cam) {
+        final String mac  = cam.optString("mac", "");
+        final String name = cam.optString("name", "Câmera");
+        final String ip   = cam.optString("ip", "");
+
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this);
+        b.setTitle("Remover " + name + "?");
+        b.setMessage(
+            "Escolha como deseja remover esta câmera:\n\n" +
+            "• Resetar câmera: apaga o Wi-Fi da câmera e ela volta ao modo de pareamento " +
+            "(LED piscando). Necessário para reconfigurar.\n\n" +
+            "• Remover só do app: mantém a câmera configurada no Wi-Fi atual, " +
+            "apenas apaga o registro local."
+        );
+        b.setPositiveButton("Resetar câmera", (d, w) -> resetCameraAndRemove(cam));
+        b.setNeutralButton("Remover só do app", (d, w) -> {
+            deleteCamera(mac);
+            renderMyCameras();
+            toast("Câmera removida do app");
+        });
+        b.setNegativeButton("Cancelar", null);
+        b.show();
+    }
+
+    private void resetCameraAndRemove(final JSONObject cam) {
+        final String mac  = cam.optString("mac", "");
+        final String name = cam.optString("name", "Câmera");
+        final String sn   = cam.optString("sn", "");
+        final String savedIp = cam.optString("ip", "");
+
+        // Senha da câmera — normalmente vazia. Mantemos o campo do wizard se foi preenchido.
+        final String camPass = cameraPassInput != null
+                ? cameraPassInput.getText().toString().trim() : "";
+        final String camUser = "admin"; // padrão XM (não yura)
+
+        toast("Procurando câmera na rede...");
+        pool.execute(() -> {
+            String ip = savedIp;
+            if (ip == null || ip.isEmpty()) ip = findCameraIpOnLan(sn, mac);
+            if (ip == null || ip.isEmpty()) {
+                runOnUiThread(() -> {
+                    new android.app.AlertDialog.Builder(this)
+                        .setTitle("Câmera não encontrada")
+                        .setMessage(
+                            "Não foi possível encontrar a câmera " + name + " na rede.\n\n" +
+                            "Para resetar manualmente, segure o botão de reset físico da câmera " +
+                            "por 5 a 10 segundos até o LED voltar a piscar.\n\n" +
+                            "Deseja apenas remover do app?")
+                        .setPositiveButton("Remover do app", (d, w) -> {
+                            deleteCamera(mac);
+                            renderMyCameras();
+                            toast("Câmera removida do app");
+                        })
+                        .setNegativeButton("Cancelar", null)
+                        .show();
+                });
+                return;
+            }
+            final String foundIp = ip;
+            runOnUiThread(() -> toast("Câmera em " + foundIp + ". Resetando..."));
+            try {
+                dvripFactoryReset(foundIp, camUser, camPass);
+                runOnUiThread(() -> {
+                    deleteCamera(mac);
+                    renderMyCameras();
+                    toast("✓ Câmera resetada e removida. Aguarde alguns segundos para reconfigurar.");
+                });
+            } catch (Exception e) {
+                // Tenta com usuário "yura" (alternativo) se admin falhou
+                if (camUser.equals("admin")) {
+                    try {
+                        dvripFactoryReset(foundIp, "yura", camPass);
+                        runOnUiThread(() -> {
+                            deleteCamera(mac);
+                            renderMyCameras();
+                            toast("✓ Câmera resetada e removida.");
+                        });
+                        return;
+                    } catch (Exception ignored) {}
+                }
+                final String err = e.getMessage();
+                runOnUiThread(() -> {
+                    new android.app.AlertDialog.Builder(this)
+                        .setTitle("Falha ao resetar")
+                        .setMessage(
+                            "Não foi possível resetar a câmera remotamente:\n" + err + "\n\n" +
+                            "Faça o reset manualmente pelo botão físico da câmera " +
+                            "(segurar por 5-10 segundos até o LED piscar).\n\n" +
+                            "Deseja remover apenas do app?")
+                        .setPositiveButton("Remover do app", (d, w) -> {
+                            deleteCamera(mac);
+                            renderMyCameras();
+                            toast("Câmera removida do app");
+                        })
+                        .setNegativeButton("Cancelar", null)
+                        .show();
+                });
+            }
+        });
     }
 
     private String formatDate(long ts) {
@@ -2395,6 +2494,81 @@ public class MainActivity extends Activity {
             JSONObject cfgRsp = dvripRead(in);
             int cfgRet = cfgRsp.optInt("Ret", -1);
             if (cfgRet != DVRIP_OK) throw new Exception("SetConfig rejeitado (Ret=" + cfgRet + ")");
+        }
+    }
+
+    /**
+     * Reset de fábrica via DVRIP. Reverte câmera para o estado inicial — apaga
+     * Wi-Fi configurado e ela volta a anunciar no Bluetooth (modo de pareamento)
+     * após reboot.
+     *
+     * Reproduz o que o iCSee faz em DevAboutSettingActivity quando o usuário
+     * toca em "Padrão de fábrica":
+     *   1. Login DVRIP (usuário/senha)
+     *   2. OPDefaultConfig com todos os flags = 1 (reseta todas as categorias)
+     *   3. OPMachine Reboot — reinicia a câmera
+     */
+    private void dvripFactoryReset(String ip, String user, String pass) throws Exception {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(ip, DVRIP_PORT), 4000);
+            socket.setSoTimeout(8000);
+            InputStream in = socket.getInputStream();
+            OutputStream out = socket.getOutputStream();
+
+            // 1. Login
+            JSONObject loginBody = new JSONObject();
+            loginBody.put("EncryptType", "MD5");
+            loginBody.put("LoginType", "DVRIP-Web");
+            loginBody.put("PassWord", dvripMd5(pass));
+            loginBody.put("UserName", user);
+            loginBody.put("SessionID", "0x0000000000");
+            dvripSend(out, 0, seqNo.getAndIncrement(), MSG_LOGIN, loginBody.toString().getBytes(StandardCharsets.UTF_8));
+
+            JSONObject loginRsp = dvripRead(in);
+            int ret = loginRsp.optInt("Ret", -1);
+            if (ret != DVRIP_OK && ret != 101) throw new Exception("Login DVRIP rejeitado (Ret=" + ret + ")");
+            String sid = loginRsp.optString("SessionID", "0x0");
+            int sessionInt = parseHex(sid);
+
+            // 2. OPDefaultConfig — reseta todas as categorias (replica setAllConfig(1) do iCSee)
+            JSONObject defaults = new JSONObject();
+            defaults.put("Account",     1);
+            defaults.put("Alarm",       1);
+            defaults.put("CameraPARAM", 1);
+            defaults.put("Encode",      1);
+            defaults.put("General",     1);
+            defaults.put("NetCommon",   1);
+            defaults.put("NetService",  1);
+            defaults.put("Preview",     1);
+            defaults.put("PtzComm",     1);
+            defaults.put("Record",      1);
+
+            JSONObject resetBody = new JSONObject();
+            resetBody.put("Name", "OPDefaultConfig");
+            resetBody.put("SessionID", sid);
+            resetBody.put("OPDefaultConfig", defaults);
+            dvripSend(out, sessionInt, seqNo.getAndIncrement(), MSG_DEFAULT_CFG, resetBody.toString().getBytes(StandardCharsets.UTF_8));
+
+            JSONObject resetRsp = dvripRead(in);
+            int resetRet = resetRsp.optInt("Ret", -1);
+            // Aceita Ret=100 (OK) ou Ret=515/516 (já em reset) — algumas firmwares
+            if (resetRet != DVRIP_OK && resetRet != 515 && resetRet != 516)
+                throw new Exception("OPDefaultConfig rejeitado (Ret=" + resetRet + ")");
+
+            // 3. OPMachine Reboot — garante que a câmera realmente reinicia (alguns
+            // firmwares precisam de reboot explícito após DefaultConfig)
+            try {
+                JSONObject reboot = new JSONObject();
+                reboot.put("Action", "Reboot");
+                JSONObject rebootBody = new JSONObject();
+                rebootBody.put("Name", "OPMachine");
+                rebootBody.put("SessionID", sid);
+                rebootBody.put("OPMachine", reboot);
+                dvripSend(out, sessionInt, seqNo.getAndIncrement(), MSG_REBOOT, rebootBody.toString().getBytes(StandardCharsets.UTF_8));
+                // não tentamos ler resposta — câmera derruba conexão imediatamente
+            } catch (Exception ignored) {
+                // reboot pode falhar pois o socket já caiu — irrelevante, reset já passou
+            }
         }
     }
 
