@@ -485,30 +485,39 @@ public class MainActivity extends Activity {
         String mac  = device.getAddress();
         String name = device.getName();
 
-        // Tenta extrair nome do advertising packet se device.getName() for nulo
         if ((name == null || name.isEmpty()) && scanRecord != null) {
-            // Nome local está no tipo AD 0x09 (Complete Local Name) ou 0x08 (Shortened)
             name = parseLocalName(scanRecord);
         }
 
-        // Verifica service UUID 0x1910 no advertising packet
-        boolean isXm = hasServiceUuid(scanRecord, UUID_SERVICE);
+        // Critério REAL do iCSee (engenharia reversa e.n.d.c.a):
+        //  Câmera XM = Manufacturer Specific Data (AD 0xFF) contém "8B8B8B8B"
+        // Dispositivos sem esse marker são genéricos e não respondem ao serviço 0x1910.
+        boolean isXmCamera  = hasXmManufacturerMarker(scanRecord);
+        boolean hasXmService = hasServiceUuid(scanRecord, UUID_SERVICE);
 
         String upperName = name != null ? name.toUpperCase(Locale.US) : "";
         boolean nameMatch = upperName.contains("IPC") || upperName.contains("XM")
                 || upperName.contains("CAMERA") || upperName.contains("ICSEE")
                 || upperName.contains("CAM");
-        boolean rssiClose = rssi >= -70;
-        if (!isXm && !nameMatch && !rssiClose) return;
+
+        // Aceita: câmera XM confirmada (marker), serviço 0x1910 anunciado, OU nome reconhecido
+        // RSSI sozinho não basta — devices BLE quaisquer ficam próximos
+        if (!isXmCamera && !hasXmService && !nameMatch) return;
 
         scannedDevices.put(mac, device);
         if (!foundDevices.add(mac)) return;
 
         String finalName = (name != null && !name.isEmpty()) ? name : ("BLE " + mac.substring(mac.length() - 5));
-        boolean finalIsXm = isXm;
+        boolean confirmed = isXmCamera || hasXmService;
         int finalRssi = rssi;
-        logBle("Encontrado [legacyScan] tipo=" + device.getType() + " " + finalName + " " + mac + " " + rssi + "dBm" + (isXm ? " [XM✓]" : ""));
-        runOnUiThread(() -> addBleDevice(finalName, mac, finalRssi, finalIsXm, false));
+        String tag = isXmCamera ? " [XM-CAM✓]" : (hasXmService ? " [SVC1910]" : " [nome]");
+        logBle("Encontrado [legacyScan] tipo=" + device.getType() + " " + finalName + " " + mac + " " + rssi + "dBm" + tag);
+        // Log raw scanRecord (apenas para device candidato) — ajuda diagnóstico
+        if (scanRecord != null) {
+            String hex = bytesToHex(scanRecord);
+            logBle("  raw scanRecord: " + (hex.length() > 80 ? hex.substring(0, 80) + "..." : hex));
+        }
+        runOnUiThread(() -> addBleDevice(finalName, mac, finalRssi, confirmed, false));
     };
 
     // Nova API — fallback caso startLeScan falhe
@@ -519,28 +528,31 @@ public class MainActivity extends Activity {
             BluetoothDevice device = result.getDevice();
             String mac  = device.getAddress();
             String name = device.getName();
+            byte[] raw  = result.getScanRecord() != null ? result.getScanRecord().getBytes() : null;
             if (name == null && result.getScanRecord() != null)
                 name = result.getScanRecord().getDeviceName();
 
-            boolean isXm = false;
+            boolean isXmCamera  = hasXmManufacturerMarker(raw);
+            boolean hasXmService = false;
             if (result.getScanRecord() != null && result.getScanRecord().getServiceUuids() != null)
                 for (android.os.ParcelUuid u : result.getScanRecord().getServiceUuids())
-                    if (u.getUuid().equals(UUID_SERVICE)) { isXm = true; break; }
+                    if (u.getUuid().equals(UUID_SERVICE)) { hasXmService = true; break; }
 
             String upperName = name != null ? name.toUpperCase(Locale.US) : "";
             boolean nameMatch = upperName.contains("IPC") || upperName.contains("XM")
                     || upperName.contains("CAMERA") || upperName.contains("ICSEE")
                     || upperName.contains("CAM");
-            if (!isXm && !nameMatch && result.getRssi() < -70) return;
+            if (!isXmCamera && !hasXmService && !nameMatch) return;
 
             scannedDevices.put(mac, device);
             if (!foundDevices.add(mac)) return;
 
             String finalName = (name != null && !name.isEmpty()) ? name : ("BLE " + mac.substring(mac.length() - 5));
             int rssi = result.getRssi();
-            boolean finalIsXm = isXm;
-            logBle("Encontrado [newScan] tipo=" + device.getType() + " " + finalName + " " + mac + " " + rssi + "dBm");
-            runOnUiThread(() -> addBleDevice(finalName, mac, rssi, finalIsXm, false));
+            boolean confirmed = isXmCamera || hasXmService;
+            String tag = isXmCamera ? " [XM-CAM✓]" : (hasXmService ? " [SVC1910]" : " [nome]");
+            logBle("Encontrado [newScan] tipo=" + device.getType() + " " + finalName + " " + mac + " " + rssi + "dBm" + tag);
+            runOnUiThread(() -> addBleDevice(finalName, mac, rssi, confirmed, false));
         }
 
         @Override
@@ -575,6 +587,35 @@ public class MainActivity extends Activity {
         String adHex = bytesToHex(ad);
         String targetHex = bytesToHex(targetBytes);
         return adHex.contains(targetHex);
+    }
+
+    // Detecta câmera XM via marker "8B8B8B8B" no Manufacturer Data (AD type 0xFF).
+    // Engenharia reversa do iCSee (classe e.n.d.c.a) confirmou que apenas câmeras
+    // cujo manufacturer specific data contém esse padrão são consideradas câmeras
+    // XM válidas para conexão BLE. Dispositivos sem esse marker são genéricos
+    // (não respondem a connectGatt no serviço 0x1910).
+    private boolean hasXmManufacturerMarker(byte[] ad) {
+        if (ad == null || ad.length < 6) return false;
+        int i = 0;
+        while (i < ad.length - 1) {
+            int len = ad[i] & 0xFF;
+            if (len == 0) break;
+            if (i + len >= ad.length) break;
+            int type = ad[i + 1] & 0xFF;
+            // AD type 0xFF = Manufacturer Specific Data
+            if (type == 0xFF && len > 2) {
+                try {
+                    String payload = new String(ad, i + 2, len - 1, StandardCharsets.UTF_8);
+                    if (payload.contains("8B8B8B8B")) return true;
+                } catch (Exception ignored) {}
+                // Também checa em hex caso o payload não seja UTF-8
+                String hex = bytesToHex(java.util.Arrays.copyOfRange(ad, i + 2, i + 1 + len)).toUpperCase(Locale.US);
+                if (hex.contains("38423842384238423842")  // "8B8B8B8B" em ASCII hex
+                        || hex.contains("8B8B8B8B")) return true;
+            }
+            i += len + 1;
+        }
+        return false;
     }
 
     private byte[] uuidToLe(UUID uuid) {
