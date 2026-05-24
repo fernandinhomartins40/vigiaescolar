@@ -5,6 +5,7 @@ import {
   GraduationCap,
   Menu,
   LogOut,
+  Server,
   Settings,
   ShieldCheck,
   ChevronRight,
@@ -18,6 +19,7 @@ const navItems = [
   { to: "/", label: "Monitoramento", icon: ShieldCheck, end: true },
   { to: "/cadastros", label: "Cadastros", icon: GraduationCap },
   { to: "/cameras", label: "Câmeras", icon: Camera },
+  { to: "/gateways", label: "Gateways", icon: Server },
   { to: "/presenca", label: "Presença", icon: ClipboardCheck },
   { to: "/configuracoes", label: "Configurações", icon: Settings },
 ];

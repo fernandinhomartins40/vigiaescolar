@@ -323,6 +323,39 @@ export async function getSettings() {
   return unwrapSettings(response);
 }
 
+// ─── Gateways (PC desktop da escola) ───────────────────────────────────────
+export type GatewayDTO = {
+  id: string;
+  name: string;
+  schoolId?: string | null;
+  hostname?: string | null;
+  platform?: string | null;
+  appVersion?: string | null;
+  status: "PAIRED" | "ACTIVE" | "REVOKED";
+  lastSeenAt?: string | null;
+  createdAt: string;
+  school?: { id: string; name: string } | null;
+};
+
+export async function listGateways(): Promise<GatewayDTO[]> {
+  const response = (await apiRequest<unknown>("/gateways")) as { gateways?: GatewayDTO[] };
+  return response.gateways ?? [];
+}
+
+export async function createGatewayPairingCode(input: {
+  name: string;
+  schoolId?: string;
+}): Promise<{ code: string; expiresAt: string }> {
+  return (await apiRequest<unknown>("/gateways/pairing-code", {
+    method: "POST",
+    body: input,
+  })) as { code: string; expiresAt: string };
+}
+
+export async function revokeGateway(id: string): Promise<void> {
+  await apiRequest<void>(`/gateways/${id}`, { method: "DELETE" });
+}
+
 export async function updateSettings(payload: AppSettings) {
   return unwrapSettings(
     await apiRequest<unknown>("/settings", {

@@ -76,6 +76,14 @@ export async function pairWithServer(code: string): Promise<PairResult> {
   };
 }
 
+export function getGatewayToken(): string | undefined {
+  return config.get("gatewayToken");
+}
+
+export function getApiBase(): string {
+  return config.get("apiBaseUrl");
+}
+
 /** Helper para todas as chamadas autenticadas à API VigiaEscolar pelo gateway. */
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = config.get("gatewayToken");

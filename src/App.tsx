@@ -11,6 +11,7 @@ import Cadastros from "./pages/Cadastros";
 import Cameras from "./pages/Cameras";
 import Presenca from "./pages/Presenca";
 import Configuracoes from "./pages/Configuracoes";
+import Gateways from "./pages/Gateways";
 import PWA from "./pages/PWA";
 import NotFound from "./pages/NotFound.tsx";
 import Login from "./pages/Login";
@@ -53,6 +54,7 @@ const App = () => (
                 <Route path="cadastros" element={<Cadastros />} />
                 <Route path="cameras" element={<Cameras />} />
                 <Route path="presenca" element={<Presenca />} />
+                <Route path="gateways" element={<Gateways />} />
                 <Route path="configuracoes" element={<Configuracoes />} />
               </Route>
             </Route>

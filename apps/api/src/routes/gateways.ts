@@ -10,14 +10,15 @@
  *  - DELETE /:id         — admin revoga um gateway
  */
 import crypto from "node:crypto";
-import { Router } from "express";
+import { Router, raw } from "express";
 import { z } from "zod";
-import { GatewayStatus, Prisma } from "@prisma/client";
+import { CameraStatus, GatewayStatus, Prisma } from "@prisma/client";
 
 import { asyncHandler } from "../lib/http";
 import { prisma } from "../lib/prisma";
 import { encryptSecret, decryptSecret } from "../lib/security";
 import { requireAuth } from "../middleware/auth";
+import { biometricEngine } from "../services/biometrics/engine";
 
 const router = Router();
 
@@ -143,7 +144,7 @@ router.post(
 );
 
 // ─── Helper: middleware Bearer pra rotas autenticadas por gateway ──────────
-async function loadGatewayFromBearer(req: any): Promise<{ gatewayId: string; tenantId: string; schoolId: string | null } | null> {
+export async function loadGatewayFromBearer(req: any): Promise<{ gatewayId: string; tenantId: string; schoolId: string | null } | null> {
   const auth = req.headers.authorization;
   if (!auth?.startsWith("Bearer ")) return null;
   const token = auth.substring(7).trim();
@@ -226,6 +227,92 @@ router.post(
     });
 
     res.json({ ok: true, updated, received: body.cameras.length });
+  }),
+);
+
+/**
+ * Upload de frame JPEG capturado pelo gateway.
+ *
+ * Request:
+ *  - method: POST
+ *  - path: /api/gateways/frame
+ *  - headers: Authorization: Bearer <gatewayToken>, Content-Type: image/jpeg
+ *  - query: serialNumber, cameraIp, capturedAt (ms), elapsedMs
+ *  - body: JPEG bruto (até 5 MB)
+ *
+ * Behavior:
+ *  1. Resolve gateway pelo Bearer token
+ *  2. Encontra câmera no tenant pelo SerialNumber recebido
+ *  3. Atualiza lastSeenAt do gateway
+ *  4. Dispara biometricEngine.findBestMatch (assíncrono — não bloqueia o response)
+ *  5. Responde 202 Accepted imediatamente
+ */
+router.post(
+  "/frame",
+  raw({ type: "image/jpeg", limit: "5mb" }),
+  asyncHandler(async (req, res) => {
+    const ctx = await loadGatewayFromBearer(req);
+    if (!ctx) {
+      res.status(401).json({ error: "Token de gateway inválido" });
+      return;
+    }
+
+    const serialNumber = String(req.query.serialNumber ?? "").trim();
+    const cameraIp = String(req.query.cameraIp ?? "").trim();
+    const capturedAtMs = Number(req.query.capturedAt) || Date.now();
+
+    if (!serialNumber) {
+      res.status(400).json({ error: "serialNumber é obrigatório" });
+      return;
+    }
+
+    const buf = req.body as Buffer | undefined;
+    if (!buf || !Buffer.isBuffer(buf) || buf.length < 100) {
+      res.status(400).json({ error: "Body deve ser JPEG válido" });
+      return;
+    }
+
+    // Encontra câmera no tenant pelo SN
+    const camera = await prisma.camera.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        serialNumber,
+        status: CameraStatus.ACTIVE,
+      },
+      select: { id: true, schoolId: true },
+    });
+
+    // Atualiza heartbeat do gateway
+    await prisma.gateway.update({
+      where: { id: ctx.gatewayId },
+      data: { lastSeenAt: new Date(), status: GatewayStatus.ACTIVE },
+    });
+
+    if (!camera) {
+      // Frame chegou de câmera ainda não cadastrada — descarta mas responde OK
+      // pra gateway não ficar retentando.
+      res.status(202).json({ ok: true, recognized: false, reason: "camera_not_registered" });
+      return;
+    }
+
+    // Reconhecimento em background — não bloqueia o gateway
+    const imageBase64 = buf.toString("base64");
+    biometricEngine
+      .findBestMatch({
+        tenantId: ctx.tenantId,
+        schoolId: camera.schoolId,
+        imageBase64,
+        cameraId: camera.id,
+        recognizedAt: new Date(capturedAtMs),
+      })
+      .catch((err) => {
+        console.warn(
+          `[gateways/frame] reconhecimento falhou (tenant=${ctx.tenantId} cam=${camera.id}):`,
+          err?.message ?? err,
+        );
+      });
+
+    res.status(202).json({ ok: true, cameraId: camera.id, accepted: true });
   }),
 );
 
