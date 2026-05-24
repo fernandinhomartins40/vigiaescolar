@@ -24,6 +24,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.wifi.WifiManager;
+import android.widget.FrameLayout;
+import android.widget.ProgressBar;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -213,12 +215,42 @@ public class MainActivity extends Activity {
     private final ExecutorService pool  = Executors.newFixedThreadPool(24);
     private final AtomicInteger   seqNo = new AtomicInteger(0);
 
+    // ─── Wizard ───────────────────────────────────────────────────────────────
+    // O app é estruturado como wizard: uma tela por vez, com botão "Avançar".
+    // Páginas: 0=Boas-vindas, 1=Buscar câmera, 2=Selecionar rede WiFi,
+    //          3=Senha WiFi, 4=Configurando (log), 5=Sucesso
+    private static final int WIZ_WELCOME       = 0;
+    private static final int WIZ_FIND_CAMERA   = 1;
+    private static final int WIZ_PICK_WIFI     = 2;
+    private static final int WIZ_WIFI_PASSWORD = 3;
+    private static final int WIZ_CONFIGURING   = 4;
+    private static final int WIZ_SUCCESS       = 5;
+    private FrameLayout wizardContainer;
+    private View[]      wizardPages = new View[6];
+    private int         currentStep = WIZ_WELCOME;
+    private TextView    stepIndicator;
+    private TextView    stepTitleHeader;
+
+    // Estado do wizard
+    private String      selectedCameraMac  = null;
+    private String      selectedCameraName = null;
+    private String      selectedWifiSsid   = null;
+    private String      selectedWifiCaps   = null;  // capabilities da rede WiFi escolhida
+
     // ─── Widgets ──────────────────────────────────────────────────────────────
     private LinearLayout bleDeviceList;
+    private LinearLayout wifiNetworkList;
     private LinearLayout networkList;
     private LinearLayout logBle;
     private LinearLayout apiList;
     private LinearLayout schoolList;
+
+    private TextView     selectedCameraLabel;
+    private TextView     selectedWifiLabel;
+    private TextView     configStatusLabel;
+    private ProgressBar  configProgress;
+    private Button       wifiScanButton;
+    private Button       wifiPasswordContinueBtn;
 
     private EditText wifiSsidInput;
     private EditText wifiPassInput;
@@ -261,83 +293,266 @@ public class MainActivity extends Activity {
 
     @SuppressLint("SetTextI18n")
     private void buildUi() {
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setBackgroundColor(COLOR_BG);
-
+        // Container principal: header + indicador de passo + container do wizard + log
         LinearLayout root = vStack();
-        root.setPadding(dp(16), dp(16), dp(16), dp(40));
-        scroll.addView(root);
+        root.setBackgroundColor(COLOR_BG);
+        root.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         // ── Header institucional ─────────────────────────────────────────────
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
-        header.setPadding(dp(18), dp(16), dp(18), dp(16));
-        header.setBackground(rounded(COLOR_BLUE, COLOR_BLUE, 14));
-        root.addView(header, matchWrap(0, 0, 0, dp(18)));
+        header.setPadding(dp(18), dp(14), dp(18), dp(14));
+        header.setBackgroundColor(COLOR_BLUE);
+        root.addView(header, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // Linha logo + título
         LinearLayout hRow = new LinearLayout(this);
         hRow.setOrientation(LinearLayout.HORIZONTAL);
         hRow.setGravity(Gravity.CENTER_VERTICAL);
-
         View dot = new View(this);
         dot.setBackground(rounded(COLOR_GREEN, COLOR_GREEN, 6));
-        hRow.addView(dot, new LinearLayout.LayoutParams(dp(12), dp(12)));
-
-        TextView hTitle = tv("VigiaEscolar", 20, Color.WHITE, true);
+        hRow.addView(dot, new LinearLayout.LayoutParams(dp(10), dp(10)));
+        TextView hTitle = tv("VigiaEscolar", 18, Color.WHITE, true);
         hTitle.setPadding(dp(10), 0, 0, 0);
         hRow.addView(hTitle);
         header.addView(hRow);
 
-        TextView hSub = tv("Configurador de Câmera XM / iCSee", 13, Color.argb(200, 255, 255, 255), false);
-        hSub.setPadding(0, dp(4), 0, 0);
-        header.addView(hSub);
+        stepTitleHeader = tv("", 13, Color.argb(220, 255, 255, 255), false);
+        stepTitleHeader.setPadding(0, dp(2), 0, 0);
+        header.addView(stepTitleHeader);
 
-        // ── PASSO 1: Busca BLE ───────────────────────────────────────────────
-        LinearLayout bleCard = card();
-        bleCard.addView(stepRow("1", "Localizar câmera via Bluetooth"));
-        bleCard.addView(muted("O app escaneia dispositivos Bluetooth próximos que sejam câmeras XM/iCSee (Service 0x1910). Coloque a câmera em modo de pareamento (LED piscando) antes de buscar."));
+        // ── Indicador de progresso (Passo N de M) ────────────────────────────
+        LinearLayout indicatorBar = new LinearLayout(this);
+        indicatorBar.setOrientation(LinearLayout.HORIZONTAL);
+        indicatorBar.setPadding(dp(18), dp(10), dp(18), dp(10));
+        indicatorBar.setBackgroundColor(Color.WHITE);
+        indicatorBar.setGravity(Gravity.CENTER_VERTICAL);
+        stepIndicator = tv("Passo 1 de 5", 12, COLOR_BLUE, true);
+        indicatorBar.addView(stepIndicator);
+        root.addView(indicatorBar, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        bleScanButton = primaryBtn("Buscar câmeras BLE", v -> toggleBleScan());
-        bleCard.addView(gap(bleScanButton, dp(10)));
+        View divider = new View(this);
+        divider.setBackgroundColor(COLOR_BORDER);
+        root.addView(divider, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        // ── Container do wizard (frame com 6 páginas, só uma visível) ───────
+        wizardContainer = new FrameLayout(this);
+        wizardContainer.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(wizardContainer);
+
+        wizardPages[WIZ_WELCOME]       = buildPageWelcome();
+        wizardPages[WIZ_FIND_CAMERA]   = buildPageFindCamera();
+        wizardPages[WIZ_PICK_WIFI]     = buildPagePickWifi();
+        wizardPages[WIZ_WIFI_PASSWORD] = buildPageWifiPassword();
+        wizardPages[WIZ_CONFIGURING]   = buildPageConfiguring();
+        wizardPages[WIZ_SUCCESS]       = buildPageSuccess();
+        for (View page : wizardPages) wizardContainer.addView(page);
+
+        // Inicializa também widgets/campos do fluxo legado (modo AP, API, registro)
+        // — escondidos mas mantêm o código existente funcionando
+        initLegacyWidgets();
+
+        setContentView(root);
+        showStep(WIZ_WELCOME);
+    }
+
+    // ── Wizard helpers ────────────────────────────────────────────────────────
+
+    private void showStep(int step) {
+        if (step < 0 || step >= wizardPages.length) return;
+        currentStep = step;
+        for (int i = 0; i < wizardPages.length; i++) {
+            wizardPages[i].setVisibility(i == step ? View.VISIBLE : View.GONE);
+        }
+        int totalSteps = 5; // contamos sem o welcome
+        if (step == WIZ_WELCOME) {
+            stepIndicator.setText("Bem-vindo");
+            stepTitleHeader.setText("Configurador de Câmera");
+        } else if (step == WIZ_SUCCESS) {
+            stepIndicator.setText("Concluído");
+            stepTitleHeader.setText("Câmera configurada");
+        } else {
+            stepIndicator.setText("Passo " + step + " de " + totalSteps);
+            String[] titles = {"", "Encontrar câmera", "Escolher rede WiFi",
+                "Senha da rede", "Enviando configuração"};
+            stepTitleHeader.setText(titles[step]);
+        }
+    }
+
+    private LinearLayout wizardPage() {
+        LinearLayout page = vStack();
+        page.setPadding(dp(18), dp(20), dp(18), dp(20));
+        page.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        return page;
+    }
+
+    private ScrollView wizardScrollPage(LinearLayout inner) {
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        sv.addView(inner, new ScrollView.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return sv;
+    }
+
+    private TextView wizardHeading(String text) {
+        TextView t = tv(text, 22, COLOR_BLUE, true);
+        t.setPadding(0, 0, 0, dp(8));
+        return t;
+    }
+
+    // ── Página 0: Boas-vindas ─────────────────────────────────────────────────
+    private View buildPageWelcome() {
+        LinearLayout page = wizardPage();
+        page.setGravity(Gravity.CENTER);
+
+        TextView title = tv("Configurar nova câmera", 24, COLOR_BLUE, true);
+        title.setGravity(Gravity.CENTER);
+        page.addView(title);
+
+        TextView desc = muted(
+            "Este assistente vai guiá-lo passo a passo:\n\n" +
+            "1. Encontrar a câmera por Bluetooth\n" +
+            "2. Escolher a rede Wi-Fi da escola\n" +
+            "3. Informar a senha do Wi-Fi\n" +
+            "4. Enviar a configuração\n\n" +
+            "Antes de começar:\n" +
+            "• Energize a câmera e aguarde o LED piscar (modo de pareamento)\n" +
+            "• Ative o Bluetooth e a Localização do celular\n" +
+            "• Conecte o celular na rede Wi-Fi da escola"
+        );
+        desc.setGravity(Gravity.CENTER);
+        desc.setPadding(0, dp(16), 0, dp(28));
+        page.addView(desc);
+
+        page.addView(primaryBtn("Começar", v -> { showStep(WIZ_FIND_CAMERA); startBleScan(); }));
+        return page;
+    }
+
+    // ── Página 1: Encontrar câmera ────────────────────────────────────────────
+    private View buildPageFindCamera() {
+        LinearLayout page = wizardPage();
+
+        page.addView(wizardHeading("Encontrar câmera"));
+        page.addView(muted("Coloque a câmera em modo de pareamento (LED piscando) e toque em \"Procurar\". Toque na câmera que aparecer para selecioná-la."));
+
+        bleScanButton = secondaryBtn("Procurar câmeras", v -> toggleBleScan());
+        page.addView(gap(bleScanButton, dp(14)));
 
         statusBle = statusChip("Aguardando...");
-        bleCard.addView(gap(statusBle, dp(8)));
+        page.addView(gap(statusBle, dp(8)));
+
+        TextView listLbl = tv("Câmeras encontradas:", 13, COLOR_TEXT, true);
+        page.addView(gap(listLbl, dp(14)));
 
         bleDeviceList = vStack();
-        bleCard.addView(gap(bleDeviceList, dp(4)));
-        root.addView(bleCard);
+        page.addView(gap(bleDeviceList, dp(4)));
 
-        // ── PASSO 2: Wi-Fi da escola ─────────────────────────────────────────
-        LinearLayout wifiCard = card();
-        wifiCard.addView(stepRow("2", "Rede Wi-Fi da escola"));
-        wifiCard.addView(muted("Rede Wi-Fi que a câmera vai usar após ser configurada. Use a rede da escola (não a do celular)."));
-        wifiSsidInput = input("Nome da rede (SSID)");
+        return wizardScrollPage(page);
+    }
+
+    // ── Página 2: Escolher rede WiFi ──────────────────────────────────────────
+    private View buildPagePickWifi() {
+        LinearLayout page = wizardPage();
+
+        page.addView(wizardHeading("Escolher rede Wi-Fi"));
+
+        selectedCameraLabel = tv("", 12, COLOR_GREEN, true);
+        page.addView(selectedCameraLabel);
+
+        page.addView(muted("Escolha a rede Wi-Fi que a câmera vai usar. Deve ser a rede da escola, não a do celular se for diferente."));
+
+        wifiScanButton = secondaryBtn("Atualizar lista de redes", v -> scanWifiNetworks());
+        page.addView(gap(wifiScanButton, dp(14)));
+
+        TextView listLbl = tv("Redes disponíveis (2,4 GHz):", 13, COLOR_TEXT, true);
+        page.addView(gap(listLbl, dp(14)));
+
+        wifiNetworkList = vStack();
+        page.addView(gap(wifiNetworkList, dp(4)));
+
+        // Opção: digitar manualmente
+        page.addView(gap(tv("Não encontrou a rede?", 12, COLOR_MUTED, false), dp(14)));
+        Button manualBtn = secondaryBtn("Digitar nome da rede manualmente", v -> showManualSsidDialog());
+        page.addView(gap(manualBtn, dp(6)));
+
+        return wizardScrollPage(page);
+    }
+
+    // ── Página 3: Senha da rede ───────────────────────────────────────────────
+    private View buildPageWifiPassword() {
+        LinearLayout page = wizardPage();
+
+        page.addView(wizardHeading("Senha do Wi-Fi"));
+        selectedWifiLabel = tv("", 14, COLOR_BLUE, true);
+        selectedWifiLabel.setPadding(0, 0, 0, dp(10));
+        page.addView(selectedWifiLabel);
+
+        page.addView(muted("Digite a senha da rede Wi-Fi. Se a rede for aberta (sem senha), deixe em branco."));
+
         wifiPassInput = inputPass("Senha da rede Wi-Fi");
-        wifiCard.addView(field("SSID", wifiSsidInput));
-        wifiCard.addView(field("Senha da rede", wifiPassInput));
-        root.addView(wifiCard);
+        page.addView(gap(field("Senha", wifiPassInput), dp(8)));
 
-        // ── PASSO 3: Configurar via BLE ──────────────────────────────────────
-        LinearLayout configCard = card();
-        configCard.addView(stepRow("3", "Configurar câmera via Bluetooth"));
-        configCard.addView(muted("Selecione a câmera encontrada no Passo 1 e toque em configurar. O app enviará o Wi-Fi da escola diretamente para a câmera via BLE."));
-        cameraPassInput = inputPass("Senha da câmera (padrão: vazio)");
-        configCard.addView(field("Senha da câmera XM", cameraPassInput));
+        page.addView(gap(tv("Avançado: senha da câmera (deixe em branco se nunca configurou):", 11, COLOR_MUTED, false), dp(16)));
+        cameraPassInput = inputPass("Senha da câmera (opcional)");
+        page.addView(gap(field("Senha da câmera", cameraPassInput), dp(4)));
 
-        // Painel de log com scroll + botão copiar
+        // Botões: Voltar / Continuar
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setLayoutParams(matchWrap(0, dp(22), 0, 0));
+
+        Button backBtn = secondaryBtn("Voltar", v -> showStep(WIZ_PICK_WIFI));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bp.rightMargin = dp(6);
+        backBtn.setLayoutParams(bp);
+        btnRow.addView(backBtn);
+
+        wifiPasswordContinueBtn = primaryBtn("Configurar câmera", v -> startConfiguration());
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        cp.leftMargin = dp(6);
+        wifiPasswordContinueBtn.setLayoutParams(cp);
+        btnRow.addView(wifiPasswordContinueBtn);
+
+        page.addView(btnRow);
+
+        return wizardScrollPage(page);
+    }
+
+    // ── Página 4: Configurando (log + status) ─────────────────────────────────
+    private View buildPageConfiguring() {
+        LinearLayout page = wizardPage();
+
+        page.addView(wizardHeading("Enviando configuração"));
+
+        configProgress = new ProgressBar(this);
+        LinearLayout.LayoutParams ppp = matchWrap(0, dp(8), 0, dp(8));
+        configProgress.setLayoutParams(ppp);
+        page.addView(configProgress);
+
+        configStatusLabel = tv("Conectando à câmera...", 14, COLOR_TEXT, false);
+        page.addView(gap(configStatusLabel, dp(6)));
+
+        page.addView(muted("Não feche o app. A câmera vai receber o Wi-Fi via Bluetooth, e em seguida vai conectar à rede e acender o LED fixo (5–20 segundos)."));
+
+        // Painel de log
         LinearLayout logHeader = new LinearLayout(this);
         logHeader.setOrientation(LinearLayout.HORIZONTAL);
         logHeader.setGravity(Gravity.CENTER_VERTICAL);
-        logHeader.setLayoutParams(matchWrap(0, dp(10), 0, dp(4)));
+        logHeader.setLayoutParams(matchWrap(0, dp(20), 0, dp(4)));
 
         TextView logTitle = tv("Log de diagnóstico", 11, COLOR_MUTED, true);
         logTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         logHeader.addView(logTitle);
 
         Button copyBtn = new Button(this);
-        copyBtn.setText("Copiar logs");
+        copyBtn.setText("Copiar");
         copyBtn.setAllCaps(false);
         copyBtn.setTextSize(11);
         copyBtn.setTextColor(COLOR_BLUE_MED);
@@ -345,9 +560,7 @@ public class MainActivity extends Activity {
         copyBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
         copyBtn.setBackground(rounded(Color.rgb(219, 234, 254), Color.rgb(147, 197, 253), 8));
         copyBtn.setOnClickListener(v -> copyLogsToClipboard());
-        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        logHeader.addView(copyBtn, copyParams);
+        logHeader.addView(copyBtn);
 
         Button clearBtn = new Button(this);
         clearBtn.setText("Limpar");
@@ -362,10 +575,9 @@ public class MainActivity extends Activity {
         clearParams.leftMargin = dp(6);
         logHeader.addView(clearBtn, clearParams);
 
-        configCard.addView(logHeader);
+        page.addView(logHeader);
 
         logScrollView = new ScrollView(this);
-        logScrollView.setBackgroundColor(Color.rgb(15, 23, 42));
         GradientDrawable logBg = new GradientDrawable();
         logBg.setColor(Color.rgb(15, 23, 42));
         logBg.setCornerRadius(dp(8));
@@ -377,70 +589,234 @@ public class MainActivity extends Activity {
 
         logBle = vStack();
         logScrollView.addView(logBle);
-        configCard.addView(logScrollView);
+        page.addView(logScrollView);
 
-        root.addView(configCard);
+        Button cancelBtn = secondaryBtn("Cancelar e voltar", v -> {
+            disconnectBle();
+            showStep(WIZ_WELCOME);
+        });
+        page.addView(gap(cancelBtn, dp(16)));
 
-        // ── Fallback: modo AP ─────────────────────────────────────────────────
-        LinearLayout apCard = card();
-        apCard.addView(apBanner("Alternativa: Modo AP (sem Bluetooth)"));
-        apCard.addView(muted("Se não houver Bluetooth disponível, conecte o celular diretamente no hotspot da câmera (rede IPCamera_XXXXXX, senha 1234567890) e use o protocolo DVRIP pelo IP."));
-        apCard.addView(gap(secondaryBtn("Abrir configurações Wi-Fi", v -> openWifiSettings()), dp(8)));
-        cameraIpInput   = input("IP da câmera AP (padrão: 192.168.10.1)");
-        cameraUserInput = input("Usuário (padrão: yura)");
-        cameraApPassInput = inputPass("Senha da câmera");
-        cameraIpInput.setText(XM_AP_IP);
-        cameraUserInput.setText("yura");
-        apCard.addView(field("IP", cameraIpInput));
-        apCard.addView(field("Usuário", cameraUserInput));
-        apCard.addView(field("Senha câmera", cameraApPassInput));
-        apCard.addView(gap(secondaryBtn("Conectar via IP (DVRIP)", v -> apModeLogin()), dp(10)));
-        networkList = vStack();
-        apCard.addView(gap(secondaryBtn("Buscar câmeras na rede local", v -> scanLan()), dp(6)));
-        apCard.addView(gap(networkList, dp(4)));
-        root.addView(apCard);
+        return wizardScrollPage(page);
+    }
 
-        // ── PASSO 4: API VigiaEscolar ─────────────────────────────────────────
-        LinearLayout apiCard = card();
-        apiCard.addView(stepRow("4", "Login VigiaEscolar"));
-        apiCard.addView(muted("Entre com o mesmo e-mail e senha do painel web. A API é detectada automaticamente na rede local."));
-        apiUrlInput      = input("http://192.168.x.x:3001/api");
-        emailInput       = input("email@escola.com");
-        appPasswordInput = inputPass("Senha do painel web");
-        statusApi = statusChip("Não conectado");
+    // ── Página 5: Sucesso ─────────────────────────────────────────────────────
+    private View buildPageSuccess() {
+        LinearLayout page = wizardPage();
+        page.setGravity(Gravity.CENTER);
 
-        apiCard.addView(gap(secondaryBtn("Detectar API na rede", v -> discoverApis()), dp(8)));
-        apiList = vStack();
-        apiCard.addView(apiList);
-        apiCard.addView(field("URL da API", apiUrlInput));
-        apiCard.addView(field("E-mail", emailInput));
-        apiCard.addView(field("Senha", appPasswordInput));
-        apiCard.addView(gap(statusApi, dp(8)));
-        apiCard.addView(gap(primaryBtn("Entrar na API", v -> loginApi()), dp(4)));
+        TextView icon = tv("✓", 64, COLOR_GREEN, true);
+        icon.setGravity(Gravity.CENTER);
+        page.addView(icon);
 
-        apiCard.addView(gap(sectionLbl("Escola para vincular a câmera"), dp(14)));
-        schoolList = vStack();
-        apiCard.addView(gap(schoolList, dp(4)));
-        schoolInput = input("ID da escola selecionada");
-        apiCard.addView(field("Escola (ID)", schoolInput));
-        root.addView(apiCard);
+        TextView title = tv("Câmera configurada!", 22, COLOR_BLUE, true);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, dp(8), 0, dp(8));
+        page.addView(title);
 
-        // ── PASSO 5: Cadastrar ────────────────────────────────────────────────
-        LinearLayout regCard = card();
-        regCard.addView(stepRow("5", "Cadastrar câmera"));
-        regCard.addView(muted("Após a câmera conectar ao Wi-Fi da escola (LED fixo), informe o novo IP na rede local e finalize o cadastro."));
-        cameraNameInput = input("Nome da câmera (ex: Entrada Principal)");
-        cameraLocInput  = input("Localização (ex: Portão norte)");
-        cameraNameInput.setText("Câmera XM iCSee");
+        TextView desc = muted(
+            "A câmera recebeu o Wi-Fi e está conectando à rede.\n\n" +
+            "Aguarde alguns instantes até o LED ficar fixo. " +
+            "Depois você pode buscar o IP da câmera na rede local " +
+            "e cadastrá-la no painel VigiaEscolar."
+        );
+        desc.setGravity(Gravity.CENTER);
+        desc.setPadding(0, 0, 0, dp(28));
+        page.addView(desc);
 
-        TextView tipFindIp = muted("Dica: após configurar, use a opção 'Buscar câmeras na rede local' na seção Alternativa acima para encontrar o novo IP da câmera.");
-        regCard.addView(field("Nome", cameraNameInput));
-        regCard.addView(field("Localização", cameraLocInput));
-        regCard.addView(gap(tipFindIp, dp(8)));
-        regCard.addView(gap(primaryBtn("Cadastrar no VigiaEscolar", v -> registerCamera()), dp(8)));
-        root.addView(regCard);
+        page.addView(primaryBtn("Configurar outra câmera", v -> {
+            resetWizardState();
+            showStep(WIZ_WELCOME);
+        }));
 
-        setContentView(scroll);
+        return page;
+    }
+
+    // ── Inicializa widgets do fluxo legado (escondidos) ───────────────────────
+    private void initLegacyWidgets() {
+        // Estes widgets precisam existir para o código legado funcionar (modo AP, API, registro).
+        // Não são adicionados à UI por enquanto — futura expansão pode reativá-los.
+        wifiSsidInput     = input("");
+        cameraIpInput     = input("");  cameraIpInput.setText(XM_AP_IP);
+        cameraUserInput   = input("");  cameraUserInput.setText("yura");
+        cameraApPassInput = inputPass("");
+        apiUrlInput       = input("");
+        emailInput        = input("");
+        appPasswordInput  = inputPass("");
+        cameraNameInput   = input("");  cameraNameInput.setText("Câmera XM iCSee");
+        cameraLocInput    = input("");
+        schoolInput       = input("");
+        statusApi         = statusChip("Não conectado");
+        networkList       = vStack();
+        apiList           = vStack();
+        schoolList        = vStack();
+    }
+
+    private void resetWizardState() {
+        selectedCameraMac  = null;
+        selectedCameraName = null;
+        selectedWifiSsid   = null;
+        selectedWifiCaps   = null;
+        if (wifiPassInput != null) wifiPassInput.setText("");
+        if (cameraPassInput != null) cameraPassInput.setText("");
+        if (bleDeviceList != null) bleDeviceList.removeAllViews();
+        if (wifiNetworkList != null) wifiNetworkList.removeAllViews();
+        clearLogs();
+        authPasswordSent = false;
+        connectedDevSn = null;
+    }
+
+    // ── Ações do wizard ───────────────────────────────────────────────────────
+
+    private void onCameraSelected(String mac, String name) {
+        selectedCameraMac  = mac;
+        selectedCameraName = name;
+        if (bleScanning) stopBleScan();
+        if (selectedCameraLabel != null) {
+            selectedCameraLabel.setText("✓ Câmera selecionada: " + name);
+        }
+        showStep(WIZ_PICK_WIFI);
+        scanWifiNetworks();
+    }
+
+    private void onWifiSelected(String ssid, String capabilities) {
+        selectedWifiSsid = ssid;
+        selectedWifiCaps = capabilities != null ? capabilities : "";
+        if (selectedWifiLabel != null) {
+            selectedWifiLabel.setText("Rede: " + ssid);
+        }
+        if (wifiSsidInput != null) wifiSsidInput.setText(ssid);
+        boolean open = isOpenNetwork(selectedWifiCaps);
+        if (open && wifiPassInput != null) wifiPassInput.setText("");
+        showStep(WIZ_WIFI_PASSWORD);
+    }
+
+    private void showManualSsidDialog() {
+        // Dialog simples para digitar SSID
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this);
+        b.setTitle("Nome da rede Wi-Fi");
+        final EditText et = input("Nome da rede (SSID)");
+        LinearLayout wrap = vStack();
+        wrap.setPadding(dp(18), dp(8), dp(18), 0);
+        wrap.addView(et);
+        b.setView(wrap);
+        b.setPositiveButton("Continuar", (d, w) -> {
+            String ssid = et.getText().toString().trim();
+            if (ssid.isEmpty()) { toast("Informe o nome da rede"); return; }
+            onWifiSelected(ssid, "[WPA2-PSK]");  // assume WPA2 quando manual
+        });
+        b.setNegativeButton("Cancelar", null);
+        b.show();
+    }
+
+    private void startConfiguration() {
+        if (selectedCameraMac == null) { toast("Selecione a câmera primeiro"); return; }
+        if (selectedWifiSsid == null)  { toast("Selecione a rede Wi-Fi primeiro"); return; }
+        if (wifiSsidInput != null) wifiSsidInput.setText(selectedWifiSsid);
+        showStep(WIZ_CONFIGURING);
+        connectBleDevice(selectedCameraMac, selectedCameraName);
+    }
+
+    private boolean isOpenNetwork(String capabilities) {
+        if (capabilities == null) return true;
+        String c = capabilities.toUpperCase(Locale.US);
+        return !c.contains("WPA") && !c.contains("WEP") && !c.contains("PSK");
+    }
+
+    // ── Scan WiFi (lista redes próximas) ──────────────────────────────────────
+
+    @SuppressLint("MissingPermission")
+    private void scanWifiNetworks() {
+        if (wifiNetworkList == null) return;
+        wifiNetworkList.removeAllViews();
+
+        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wm == null) {
+            wifiNetworkList.addView(muted("Wi-Fi indisponível neste dispositivo."));
+            return;
+        }
+        if (!wm.isWifiEnabled()) {
+            wifiNetworkList.addView(muted("Wi-Fi está desligado. Ative o Wi-Fi nas configurações do celular."));
+            return;
+        }
+
+        try {
+            wm.startScan();
+        } catch (Exception ignored) {}
+
+        java.util.List<android.net.wifi.ScanResult> results;
+        try {
+            results = wm.getScanResults();
+        } catch (SecurityException se) {
+            wifiNetworkList.addView(muted("Sem permissão para listar redes Wi-Fi. Conceda Localização."));
+            return;
+        }
+
+        if (results == null || results.isEmpty()) {
+            wifiNetworkList.addView(muted("Nenhuma rede encontrada. Toque em \"Atualizar\" novamente em alguns segundos."));
+            return;
+        }
+
+        // Dedup por SSID (mantém o de maior RSSI), filtra vazios e 5GHz
+        java.util.Map<String, android.net.wifi.ScanResult> bySsid = new java.util.HashMap<>();
+        for (android.net.wifi.ScanResult r : results) {
+            if (r.SSID == null || r.SSID.isEmpty()) continue;
+            // Câmera XM só suporta 2,4 GHz → filtra 5 GHz (frequencies 5000-6000)
+            if (r.frequency >= 4900 && r.frequency <= 5900) continue;
+            android.net.wifi.ScanResult prev = bySsid.get(r.SSID);
+            if (prev == null || r.level > prev.level) bySsid.put(r.SSID, r);
+        }
+        java.util.List<android.net.wifi.ScanResult> sorted = new java.util.ArrayList<>(bySsid.values());
+        java.util.Collections.sort(sorted, (a, b) -> Integer.compare(b.level, a.level));
+
+        if (sorted.isEmpty()) {
+            wifiNetworkList.addView(muted("Nenhuma rede 2,4 GHz encontrada. A câmera só suporta 2,4 GHz."));
+            return;
+        }
+
+        for (android.net.wifi.ScanResult r : sorted) {
+            String ssid = r.SSID;
+            String caps = r.capabilities != null ? r.capabilities : "";
+            boolean open = isOpenNetwork(caps);
+            int dbm = r.level;
+            int bars = dbm >= -55 ? 4 : dbm >= -65 ? 3 : dbm >= -75 ? 2 : 1;
+            String barsStr = repeat("▮", bars) + repeat("▯", 4 - bars);
+            String label = ssid + "\n" + barsStr + "  " + dbm + " dBm  " + (open ? "Aberta" : "Protegida");
+            Button btn = listBtn(label, v -> onWifiSelected(ssid, caps));
+            wifiNetworkList.addView(btn);
+        }
+    }
+
+    private String repeat(String s, int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) sb.append(s);
+        return sb.toString();
+    }
+
+    /**
+     * Replica e.x.f.b(capabilities) do iCSee: traduz capabilities WiFi para o
+     * código de encriptação esperado pela câmera XM (1 byte).
+     * Capabilities é a string que vem em ScanResult.capabilities, ex: "[WPA2-PSK-CCMP+TKIP][ESS]".
+     *
+     * Retorno:
+     *   0=OPEN  1=WEP  2=WPA_PSK (literal)
+     *   3=WPA(2)+PSK (não WPA-WPA2)  4=WPA-PSK (legado)  5=WPA2-ENTERPRISE
+     *   6=WPA-PSK  7=WPA3+WPA2+PSK  8=WAPI+PSK
+     */
+    private int encrypFromCapabilities(String capabilities, String passwd) {
+        if (passwd == null || passwd.isEmpty()) return 0;  // sem senha = OPEN
+        if (capabilities == null || capabilities.isEmpty()) return 6;  // assume WPA2-PSK comum
+        String c = capabilities.toUpperCase(Locale.US);
+
+        if (c.contains("WAPI") && c.contains("PSK")) return 8;
+        if (c.contains("WPA3") && c.contains("WPA2") && c.contains("PSK")) return 7;
+        if (c.contains("WPA3") && c.contains("PSK")) return 6;
+        if (c.contains("WPA2") && c.contains("ENTERPRISE")) return 5;
+        if (c.contains("WPA2") && c.contains("PSK")) return 6;  // mais comum (escola)
+        if (c.contains("WPA") && c.contains("PSK")) return 3;
+        if (c.contains("WPA_PSK")) return 2;
+        if (c.contains("WEP")) return 1;
+        return 0;
     }
 
     // ─── PASSO 1: BLE Scan ────────────────────────────────────────────────────
@@ -663,13 +1039,9 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void addBleDevice(String name, String mac, int rssi, boolean confirmed, boolean randomMac) {
-        String tag = confirmed ? "[XM ✓] " : "[BLE] ";
-        String macNote = randomMac ? " [MAC aleatório]" : "";
-        String label = tag + name + "\n" + mac + macNote + "   " + rssi + " dBm\nToque para conectar";
-        Button btn = listBtn(label, v -> {
-            stopBleScan();
-            connectBleDevice(mac, name);
-        });
+        String tag = confirmed ? "[CÂMERA ✓] " : "[BLE] ";
+        String label = tag + name + "\n" + mac + "   " + rssi + " dBm\nToque para selecionar";
+        Button btn = listBtn(label, v -> onCameraSelected(mac, name));
         bleDeviceList.addView(btn);
         logBle("Encontrado: " + name + " (" + mac + ") " + rssi + " dBm" + (confirmed ? " [XM]" : ""));
     }
@@ -862,7 +1234,10 @@ public class MainActivity extends Activity {
                 bleConnecting = false;
                 bleConnected  = true;
                 stopReconnect();  // sucesso → cancela timer de reconnect
-                runOnUiThread(() -> logBle("✓ STATE_CONNECTED! Limpando cache GATT e solicitando MTU..."));
+                runOnUiThread(() -> {
+                    logBle("✓ STATE_CONNECTED! Limpando cache GATT e solicitando MTU...");
+                    if (configStatusLabel != null) configStatusLabel.setText("Conectado à câmera. Negociando canal de comunicação...");
+                });
                 refreshDeviceCache(gatt);
                 mainHandler.postDelayed(() -> {
                     try { gatt.requestMtu(512); } catch (Exception e) {
@@ -1001,7 +1376,10 @@ public class MainActivity extends Activity {
         @SuppressLint("MissingPermission")
         @Override
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
-            runOnUiThread(() -> logBle("CCCD write status=" + status + ". Aguardando frame inicial da câmera..."));
+            runOnUiThread(() -> {
+                logBle("CCCD write status=" + status + ". Aguardando frame inicial da câmera...");
+                if (configStatusLabel != null) configStatusLabel.setText("Conectado. Enviando configuração Wi-Fi...");
+            });
             // Câmera envia GET_NETWORK_STATE callback automaticamente após notify habilitado.
             // Timeout 5s: se nada chegar, envia CONNECT_WIFI direto.
             mainHandler.postDelayed(() -> {
@@ -1105,11 +1483,14 @@ public class MainActivity extends Activity {
             if (result == 0x00) {
                 logBle("✓ Câmera aceitou Wi-Fi! Aguarde conectar (LED fixo).");
                 setChip(statusBle, "Wi-Fi configurado ✓", COLOR_GREEN);
+                if (configStatusLabel != null) configStatusLabel.setText("Wi-Fi enviado com sucesso!");
                 mainHandler.postDelayed(this::disconnectBle, 1500);
-                toast("Câmera configurada! Aguarde conectar ao Wi-Fi da escola.");
+                // Avança para tela de sucesso após 2s (deixa logs visíveis um instante)
+                mainHandler.postDelayed(() -> showStep(WIZ_SUCCESS), 2000);
             } else {
                 logBle("✗ Câmera recusou WiFi (result=0x" + String.format("%02X", result) + ")");
                 setChip(statusBle, "Falha Wi-Fi", Color.rgb(185, 28, 28));
+                if (configStatusLabel != null) configStatusLabel.setText("Câmera recusou a configuração. Verifique a senha do Wi-Fi.");
             }
         } else {
             // funId desconhecido — tenta logar conteúdo como string
@@ -1143,9 +1524,9 @@ public class MainActivity extends Activity {
 
         byte[] ssidBytes = ssid.getBytes(StandardCharsets.UTF_8);
         byte[] passBytes = wifiPass.getBytes(StandardCharsets.UTF_8);
-        // Encriptação assumida — para redes da escola típicas WPA2-PSK: 6 (WPA+PSK)
-        // 0 se senha vazia
-        int encryp = wifiPass.isEmpty() ? 0 : 6;
+        // Encriptação detectada das capabilities da rede escolhida (replica e.x.f.b).
+        // Fallback: 6 (WPA+PSK) se não houver capabilities ou se senha não-vazia.
+        int encryp = encrypFromCapabilities(selectedWifiCaps, wifiPass);
 
         byte[] content = new byte[1 + ssidBytes.length + 1 + passBytes.length + 1];
         int offset = 0;
