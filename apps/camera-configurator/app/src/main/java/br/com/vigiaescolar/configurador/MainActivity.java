@@ -3129,6 +3129,24 @@ public class MainActivity extends Activity {
             // 9. fVideo.OSDInfo — versão de firmware visível no OSD
             dvripQueryAndAppend(report, in, out, sessionInt, 1042, "fVideo.OSDInfo");
 
+            // 10. NetWork.NetPMS — config do servidor P2P xmeye.net (pode ser redirecionado)
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "NetWork.NetPMS");
+
+            // 11. NetWork.NetPMSV2 — versão nova do P2P
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "NetWork.NetPMSV2");
+
+            // 12. NetWork.NetRTSP — config do server RTSP local
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "NetWork.NetRTSP");
+
+            // 13. NetWork.NetNat — UPnP / NAT traversal
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "NetWork.NetNat");
+
+            // 14. NetWork.Wifi — confirma que está conectada na WiFi correta
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "NetWork.Wifi");
+
+            // 15. Detail (alguns firmwares retornam aqui SoC real, build name, etc)
+            dvripQueryAndAppend(report, in, out, sessionInt, 1042, "Detail");
+
         } catch (Exception e) {
             report.append("\n✗ Erro de conexão DVRIP: ")
                   .append(e.getClass().getSimpleName())
