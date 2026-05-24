@@ -310,6 +310,12 @@ model Camera {
   passwordEncrypted    String?
   recognitionStartTime String?
   recognitionEndTime   String?
+  // Identificação física da câmera (BLE/XM iCSee) — usado para sincronização
+  // entre o APK configurador e o servidor. Permitem que após reinstalar o app
+  // a lista de câmeras seja restaurada pelo servidor.
+  bluetoothMac         String?
+  serialNumber         String?
+  wifiSsid             String?
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
 

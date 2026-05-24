@@ -79,6 +79,10 @@ export type CameraDTO = {
   resolucao: "720p" | "1080p" | "4K";
   fps: number;
   status: "Ativa" | "Inativa" | "Manutenção";
+  // Identificadores físicos da câmera (opcionais — preenchidos pelo APK configurador)
+  bluetoothMac?: string;
+  serialNumber?: string;
+  wifiSsid?: string;
   operacional: {
     status: "ONLINE" | "OFFLINE" | "DEGRADED" | "ERROR" | "UNKNOWN";
     gatewayId?: string;

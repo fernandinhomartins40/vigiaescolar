@@ -269,6 +269,9 @@ export function toCameraDTO(camera: CameraRecord): CameraDTO {
     resolucao: camera.resolution as CameraDTO["resolucao"],
     fps: camera.fps,
     status: cameraStatusToLabel[camera.status as keyof typeof cameraStatusToLabel] ?? "Ativa",
+    bluetoothMac: (camera as { bluetoothMac?: string | null }).bluetoothMac ?? undefined,
+    serialNumber: (camera as { serialNumber?: string | null }).serialNumber ?? undefined,
+    wifiSsid: (camera as { wifiSsid?: string | null }).wifiSsid ?? undefined,
     operacional: {
       status: (camera.runtimeStatus?.healthStatus as CameraDTO["operacional"]["status"]) ?? "UNKNOWN",
       gatewayId: camera.runtimeStatus?.gatewayId ?? undefined,

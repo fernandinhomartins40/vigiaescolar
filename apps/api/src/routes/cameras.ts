@@ -35,6 +35,10 @@ const cameraSchema = z.object({
   senha: z.string().trim().optional(),
   inicioReconhecimento: z.string().trim().regex(/^\d{2}:\d{2}$/).optional(),
   fimReconhecimento: z.string().trim().regex(/^\d{2}:\d{2}$/).optional(),
+  // Identificadores físicos vindos do APK configurador (XM/iCSee)
+  bluetoothMac: z.string().trim().optional(),
+  serialNumber: z.string().trim().optional(),
+  wifiSsid: z.string().trim().optional(),
 });
 
 const deviceSourceSchema = z.object({
@@ -266,26 +270,39 @@ router.post(
 
     await ensureSchool(tenantId, body.escolaId);
 
-    const camera = await prisma.camera.create({
-      data: {
-        tenantId,
-        schoolId: body.escolaId,
-        name: body.nome,
-        location: body.localizacao,
-        type: parseCameraType(body.tipo),
-        streamUrl: body.url,
-        resolution: body.resolucao,
-        fps: body.fps,
-        status: parseCameraStatus(body.status),
-        port: body.porta,
-        username: body.usuario,
-        passwordEncrypted: body.senha ? encryptSecret(body.senha) : undefined,
-        recognitionStartTime: body.inicioReconhecimento,
-        recognitionEndTime: body.fimReconhecimento,
-      },
-    });
+    // Upsert por bluetoothMac dentro do tenant: se o APK reenviar a mesma
+    // câmera, atualizamos em vez de duplicar.
+    const existingByMac = body.bluetoothMac
+      ? await prisma.camera.findFirst({
+          where: { tenantId, bluetoothMac: body.bluetoothMac },
+        })
+      : null;
 
-    res.status(201).json(toCameraDTO({ ...camera, runtimeStatus: null }));
+    const data = {
+      tenantId,
+      schoolId: body.escolaId,
+      name: body.nome,
+      location: body.localizacao,
+      type: parseCameraType(body.tipo),
+      streamUrl: body.url,
+      resolution: body.resolucao,
+      fps: body.fps,
+      status: parseCameraStatus(body.status),
+      port: body.porta,
+      username: body.usuario,
+      passwordEncrypted: body.senha ? encryptSecret(body.senha) : undefined,
+      recognitionStartTime: body.inicioReconhecimento,
+      recognitionEndTime: body.fimReconhecimento,
+      bluetoothMac: body.bluetoothMac,
+      serialNumber: body.serialNumber,
+      wifiSsid: body.wifiSsid,
+    };
+
+    const camera = existingByMac
+      ? await prisma.camera.update({ where: { id: existingByMac.id }, data })
+      : await prisma.camera.create({ data });
+
+    res.status(existingByMac ? 200 : 201).json(toCameraDTO({ ...camera, runtimeStatus: null }));
   }),
 );
 

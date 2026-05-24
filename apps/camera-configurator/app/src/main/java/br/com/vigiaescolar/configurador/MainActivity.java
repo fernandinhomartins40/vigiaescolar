@@ -929,12 +929,14 @@ public class MainActivity extends Activity {
         }, 1800);
     }
 
-    // ── Página 8: Minhas câmeras (persistidas localmente) ─────────────────────
+    // ── Página 8: Minhas câmeras (persistidas localmente + sincronizadas) ────
     private View buildPageMyCameras() {
         LinearLayout page = wizardPage();
 
         page.addView(wizardHeading("Minhas câmeras"));
-        page.addView(muted("Câmeras já configuradas neste celular. Toque em \"Atualizar\" para tentar carregar a miniatura."));
+        page.addView(muted("Câmeras já configuradas. A lista é sincronizada com o servidor VigiaEscolar para sobreviver à reinstalação do app."));
+
+        page.addView(gap(secondaryBtn("Sincronizar com servidor", v -> syncCamerasFromServer(true)), dp(12)));
 
         myCamerasList = vStack();
         page.addView(gap(myCamerasList, dp(14)));
@@ -942,6 +944,104 @@ public class MainActivity extends Activity {
         page.addView(gap(secondaryBtn("Voltar ao início", v -> showStep(WIZ_WELCOME)), dp(20)));
 
         return wizardScrollPage(page);
+    }
+
+    /**
+     * Baixa lista de câmeras do servidor VigiaEscolar (GET /cameras) e popula
+     * o banco SQLite local. Chamado:
+     *   - após login bem-sucedido (silencioso)
+     *   - quando o usuário toca em "Sincronizar com servidor"
+     *
+     * Cada câmera remota é identificada pelo bluetoothMac. Se já existir
+     * localmente, mantém o snapshot e atualiza os demais campos. Se não
+     * existir, insere. Não apaga câmeras locais que não estão no servidor
+     * (podem estar em meio à configuração ou serem de outro tenant).
+     */
+    private void syncCamerasFromServer(boolean showToasts) {
+        if (apiToken == null || apiToken.isEmpty()) {
+            if (showToasts) toast("Faça login primeiro");
+            return;
+        }
+        final String url = apiUrlInput != null
+            ? apiUrlInput.getText().toString().trim().replaceAll("/$", "")
+            : "";
+        if (url.isEmpty()) {
+            if (showToasts) toast("Servidor não configurado");
+            return;
+        }
+        pool.execute(() -> {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(url + "/cameras").openConnection();
+                c.setRequestMethod("GET");
+                c.setRequestProperty("Authorization", "Bearer " + apiToken);
+                c.setRequestProperty("Accept", "application/json");
+                c.setConnectTimeout(6000); c.setReadTimeout(8000);
+                int code = c.getResponseCode();
+                if (code >= 300) throw new Exception("HTTP " + code);
+                String raw = readStream(c.getInputStream()).trim();
+                JSONArray arr = raw.startsWith("[") ? new JSONArray(raw)
+                    : new JSONObject(raw).optJSONArray("data");
+                if (arr == null) arr = new JSONArray();
+
+                int merged = 0;
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject cam = arr.optJSONObject(i);
+                    if (cam == null) continue;
+                    String mac = cam.optString("bluetoothMac", "");
+                    if (mac.isEmpty()) continue;  // câmera sem MAC não foi configurada pelo APK
+                    upsertCameraFromServer(cam);
+                    merged++;
+                }
+
+                final int finalMerged = merged;
+                runOnUiThread(() -> {
+                    if (showToasts) toast("✓ Sincronizadas " + finalMerged + " câmeras do servidor");
+                    if (currentStep == WIZ_MY_CAMERAS) renderMyCameras();
+                });
+            } catch (Exception e) {
+                if (showToasts) runOnUiThread(() -> toast("Erro ao sincronizar: " + e.getMessage()));
+            }
+        });
+    }
+
+    /** Insere ou atualiza uma câmera vinda da API, preservando snapshot local. */
+    private void upsertCameraFromServer(JSONObject remote) {
+        String mac = remote.optString("bluetoothMac", "");
+        if (mac.isEmpty()) return;
+        try {
+            JSONObject existing = findCamera(mac);
+            ContentValues cv = new ContentValues();
+            cv.put("mac",  mac);
+            cv.put("name", remote.optString("nome", "Câmera"));
+            cv.put("ssid", remote.optString("wifiSsid", ""));
+            cv.put("sn",   remote.optString("serialNumber", ""));
+            // IP: extrai do streamUrl (rtsp://IP:554/...) se possível
+            String streamUrl = remote.optString("url", "");
+            String ip = extractIpFromStreamUrl(streamUrl);
+            cv.put("ip", existing != null && (ip == null || ip.isEmpty())
+                ? existing.optString("ip", "") : (ip == null ? "" : ip));
+            cv.put("configured_at", existing != null
+                ? existing.optLong("when", System.currentTimeMillis())
+                : System.currentTimeMillis());
+            db().getWritableDatabase()
+                .insertWithOnConflict(CamerasDb.TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        } catch (Exception ignored) {}
+    }
+
+    private String extractIpFromStreamUrl(String url) {
+        if (url == null || url.isEmpty()) return "";
+        try {
+            int proto = url.indexOf("://");
+            if (proto < 0) return "";
+            String rest = url.substring(proto + 3);
+            int slash = rest.indexOf('/');
+            String hostPort = slash >= 0 ? rest.substring(0, slash) : rest;
+            int colon = hostPort.indexOf(':');
+            String host = colon >= 0 ? hostPort.substring(0, colon) : hostPort;
+            // Verifica se parece IPv4 (não vamos resolver DNS)
+            if (host.matches("\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}")) return host;
+        } catch (Exception ignored) {}
+        return "";
     }
 
     private void renderMyCameras() {
@@ -2725,6 +2825,8 @@ public class MainActivity extends Activity {
                         // Pré-popula lista de escolas para o Register vir já pronto
                         if (schoolList != null) showSchools(finalArr);
                         // Mantém Welcome (default em buildUi)
+                        // Sincroniza câmeras silenciosamente para sobreviver à reinstalação
+                        syncCamerasFromServer(false);
                     });
                 } else {
                     // Token expirado/inválido — limpa e força login
@@ -2826,6 +2928,8 @@ public class MainActivity extends Activity {
                     setChip(statusApi, "Conectado ✓", COLOR_GREEN);
                     toast("Login realizado");
                     fetchSchools(url, token);
+                    // Sincroniza câmeras já configuradas (silencioso na primeira vez)
+                    syncCamerasFromServer(false);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
@@ -2914,7 +3018,16 @@ public class MainActivity extends Activity {
                 payload.put("status", "Ativa");
                 payload.put("usuario", "yura");
                 payload.put("senha", cameraPassInput.getText().toString().trim());
-                if (connectedDevSn != null) payload.put("serialNo", connectedDevSn);
+                // Identificadores físicos — permitem ressincronização após reinstalação
+                if (selectedCameraMac != null && !selectedCameraMac.isEmpty()) {
+                    payload.put("bluetoothMac", selectedCameraMac);
+                }
+                if (connectedDevSn != null && !connectedDevSn.isEmpty()) {
+                    payload.put("serialNumber", connectedDevSn);
+                }
+                if (selectedWifiSsid != null && !selectedWifiSsid.isEmpty()) {
+                    payload.put("wifiSsid", selectedWifiSsid);
+                }
 
                 HttpURLConnection c = (HttpURLConnection) new URL(apiUrl + "/cameras").openConnection();
                 c.setRequestMethod("POST");
