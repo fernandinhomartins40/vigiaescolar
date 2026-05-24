@@ -128,6 +128,7 @@ model Tenant {
   faceEnrollments FaceEnrollment[]
   faceEmbeddings FaceEmbedding[]
   faceRecognitionEvents FaceRecognitionEvent[]
+  gateways    Gateway[]
 }
 
 model User {
@@ -195,6 +196,7 @@ model School {
   cameraEvents    CameraEvent[]
   faceIdentities  FaceIdentity[]
   faceRecognitionEvents FaceRecognitionEvent[]
+  gateways        Gateway[]
 
   @@unique([tenantId, cnpj])
   @@unique([tenantId, email])
@@ -290,6 +292,57 @@ model StudentGuardian {
 
   @@id([studentId, guardianId])
   @@index([tenantId])
+}
+
+/// Gateway desktop instalado no PC da escola — faz relay LAN -> VPS das câmeras.
+model Gateway {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// Escola onde este gateway está instalado (opcional — pode servir o tenant inteiro)
+  schoolId    String?
+  school      School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  /// Nome amigável que o admin define ao parear (ex: "PC da Secretaria")
+  name        String
+  /// Token Bearer usado pelo gateway para autenticar todas as chamadas API.
+  /// Não é hash — é o token plain (rotacionável). Guardado encrypted at-rest.
+  tokenEncrypted String
+  /// Informações do host capturadas no pareamento
+  hostname    String?
+  platform    String?
+  arch        String?
+  appVersion  String?
+  /// Heartbeat: última vez que o gateway pingou a API
+  lastSeenAt  DateTime?
+  /// Status: ACTIVE (operacional), PAIRED (cadastrado mas nunca conectou), REVOKED
+  status      GatewayStatus @default(PAIRED)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([schoolId])
+}
+
+enum GatewayStatus {
+  PAIRED
+  ACTIVE
+  REVOKED
+}
+
+/// Códigos de pareamento de uso único — gerados no painel web, consumidos pelo
+/// gateway desktop ao parear. Válidos por 10 minutos.
+model GatewayPairingCode {
+  code        String   @id  // 6 dígitos (ex: "428193")
+  tenantId    String
+  schoolId    String?
+  name        String   // nome sugerido pro gateway
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  consumedByGatewayId String?
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([expiresAt])
 }
 
 model Camera {

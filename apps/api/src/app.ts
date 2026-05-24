@@ -13,6 +13,8 @@ import guardianRoutes from "./routes/guardians";
 import studentRoutes from "./routes/students";
 import cameraRoutes from "./routes/cameras";
 import cameraEventsRoutes from "./routes/camera-events";
+import { openipcRoutes } from "./routes/openipc";
+import { gatewayRoutes } from "./routes/gateways";
 import biometricsRoutes from "./routes/biometrics";
 import notificationRoutes from "./routes/notifications";
 import attendanceRoutes from "./routes/attendance";
@@ -74,6 +76,10 @@ export function createApp() {
   app.use("/api/alunos", studentRoutes);
   app.use("/api/cameras", cameraRoutes);
   app.use("/api/camera-events", cameraEventsRoutes);
+  // openipcRoutes precisa vir DEPOIS de cameraRoutes para não conflitar com
+  // /cameras/:id, mas é montado em /api/cameras/openipc-config como sub-path.
+  app.use("/api", openipcRoutes);
+  app.use("/api/gateways", gatewayRoutes);
   app.use("/api/biometria", biometricsRoutes);
   app.use("/api/biometrics", biometricsRoutes);
   app.use("/api/notifications", notificationRoutes);
