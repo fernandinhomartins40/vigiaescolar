@@ -610,77 +610,43 @@ public class MainActivity extends Activity {
         connectedDevSn = null;
         connectedMac = mac;
 
-        // Detecta MAC aleatório: bits 7-6 do primeiro octeto != 00 → não-público
-        boolean isRandomMac = (Integer.parseInt(mac.substring(0, 2), 16) & 0xC0) != 0x00;
-
-        logBle("Conectando em " + name + " (" + mac + ")" + (isRandomMac ? " [MAC aleatório]" : "") + "...");
-        if (isRandomMac) {
-            logBle("⚠ MAC aleatório detectado. Android 12+ exige o objeto BluetoothDevice do scan.");
-        }
-        setChip(statusBle, "Conectando...", COLOR_BLUE_MED);
+        logBle("Conectando em " + name + " (" + mac + ")...");
+        setChip(statusBle, "Parando scan...", COLOR_BLUE_MED);
 
         BluetoothManager mgr = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         BluetoothAdapter adapter = mgr != null ? mgr.getAdapter() : null;
         if (adapter == null || !adapter.isEnabled()) {
             logBle("✗ Bluetooth desligado.");
+            bleConnecting = false;
             return;
         }
 
-        // Usa o BluetoothDevice guardado do ScanResult se disponível (crítico para MACs aleatórios)
-        BluetoothDevice cached = scannedDevices.get(mac);
-        final BluetoothDevice device;
-        if (cached == null) {
-            logBle("⚠ Device não encontrado no cache do scan — usando getRemoteDevice");
-            device = adapter.getRemoteDevice(mac);
-        } else {
-            logBle("Device recuperado do cache do scan. Tipo: " + cached.getType());
-            device = cached;
-        }
+        // Fluxo clonado do iCSee v7.1.1 (engenharia reversa do classes2.dex e.l.a.a.k.d.h):
+        //   1. Para QUALQUER scan em andamento (startLeScan E BluetoothLeScanner)
+        //   2. Aguarda 500ms para o stack BT do Android processar o stop
+        //   3. Cria device via adapter.getRemoteDevice(mac) — NÃO usa cache do scan
+        //   4. Chama connectGatt(ctx, false, cb, TRANSPORT_LE) no MAIN THREAD
+        //
+        // Pontos críticos descobertos:
+        //   - Conectar enquanto scaneia bloqueia silenciosamente (sem callback)
+        //   - getRemoteDevice é mais confiável que cached do ScanResult para câmeras XM
+        //   - connectGatt DEVE ser do main thread em algumas marcas (Xiaomi/Huawei)
+        //   - autoConnect=false + TRANSPORT_LE é o que o iCSee usa (confirmado)
+        stopBleScan();
+        try { adapter.cancelDiscovery(); } catch (Exception ignored) {}
 
-        // Câmeras XM retornam DEVICE_TYPE_UNKNOWN (tipo=0) no scan.
-        // Dispositivos tipo=0 no Xiaomi MIUI/HyperOS bloqueiam connectGatt silenciosamente
-        // com autoConnect=false. A solução é usar autoConnect=true na primeira chamada —
-        // isso registra o device no stack BT do Android. Quando onConnectionStateChange
-        // disparar (conectado ou erro), fecha o gatt e reconecta com autoConnect=false.
-        // Se autoConnect=true não disparar em 8s, tenta direto com autoConnect=false.
-        if (device.getType() == BluetoothDevice.DEVICE_TYPE_UNKNOWN) {
-            logBle("Tipo=0 detectado. Registrando device via autoConnect=true por 3s...");
-            setChip(statusBle, "Registrando...", COLOR_BLUE_MED);
-            BluetoothGatt[] preGatt = new BluetoothGatt[1];
-            boolean[] registered = {false};
-            BluetoothGattCallback preCallback = new BluetoothGattCallback() {
-                @SuppressLint("MissingPermission")
-                @Override
-                public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-                    runOnUiThread(() -> logBle("Pre-connect onConnectionStateChange status=" + status + " newState=" + newState));
-                    registered[0] = true;
-                    try { gatt.disconnect(); } catch (Exception ignored) {}
-                    mainHandler.postDelayed(() -> {
-                        try { gatt.close(); } catch (Exception ignored) {}
-                        if (preGatt[0] == gatt) preGatt[0] = null;
-                        runOnUiThread(() -> logBle("Device registrado. Reconectando com autoConnect=false..."));
-                        mainHandler.postDelayed(() -> doConnectGatt(device), 500);
-                    }, 300);
-                }
-            };
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                preGatt[0] = device.connectGatt(this, true, preCallback, BluetoothDevice.TRANSPORT_LE);
-            } else {
-                preGatt[0] = device.connectGatt(this, true, preCallback);
+        mainHandler.postDelayed(() -> {
+            try {
+                BluetoothDevice device = adapter.getRemoteDevice(mac);
+                logBle("Device obtido via getRemoteDevice. Tipo: " + device.getType());
+                setChip(statusBle, "Conectando...", COLOR_BLUE_MED);
+                doConnectGatt(device);
+            } catch (Exception e) {
+                logBle("✗ Erro getRemoteDevice: " + e.getMessage());
+                bleConnecting = false;
+                setChip(statusBle, "Erro endereço inválido", Color.rgb(185, 28, 28));
             }
-            logBle("autoConnect=true retornou: " + (preGatt[0] != null ? "OK" : "NULL"));
-            // Após 8s sem resposta, tenta direto com autoConnect=false
-            mainHandler.postDelayed(() -> {
-                if (!bleConnected && !registered[0]) {
-                    runOnUiThread(() -> logBle("Timeout registro 8s. Tentando autoConnect=false direto..."));
-                    try { if (preGatt[0] != null) { preGatt[0].disconnect(); preGatt[0].close(); preGatt[0] = null; } } catch (Exception ignored) {}
-                    mainHandler.postDelayed(() -> doConnectGatt(device), 300);
-                }
-            }, 8_000);
-        } else {
-            logBle("Tipo=" + device.getType() + ". Conectando diretamente...");
-            doConnectGatt(device);
-        }
+        }, 600);
     }
 
     private void unregisterBondReceiver() {

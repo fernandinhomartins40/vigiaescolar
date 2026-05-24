@@ -8,8 +8,12 @@ android {
 
     defaultConfig {
         applicationId "br.com.vigiaescolar.configurador"
-        minSdk 26
-        targetSdk 35
+        minSdk 21
+        // targetSdk 33 — espelha o iCSee v7.1.1 que conecta na mesma câmera.
+        // Targets >= 34 mudam o comportamento do stack BLE no Android 14/15:
+        // BluetoothLeScanner com BLUETOOTH_SCAN neverForLocation filtra scanRecords
+        // e marca devices como DEVICE_TYPE_UNKNOWN, fazendo connectGatt travar.
+        targetSdk 33
         versionCode 1
         versionName "0.1.0"
     }
