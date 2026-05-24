@@ -294,6 +294,10 @@ public class MainActivity extends Activity {
         buildUi();
         initBle();
         discoverApis();
+        // O buildUi() já mostra WIZ_WELCOME por padrão. Sobrescrevemos:
+        // - se há token salvo, valida em background; se ok, fica no Welcome
+        // - se não há, mostra a tela de login como gate de entrada
+        tryRestoreSessionOrGoToLogin();
     }
 
     @Override
@@ -395,7 +399,9 @@ public class MainActivity extends Activity {
             stepIndicator.setText("Wi-Fi configurado");
             stepTitleHeader.setText("Câmera no Wi-Fi");
         } else if (step == WIZ_LOGIN) {
-            stepIndicator.setText("Passo 6 de 7");
+            // Quando ainda não há sessão é o gate de entrada do app; senão é um passo do wizard
+            boolean hasSession = apiToken != null && !apiToken.isEmpty();
+            stepIndicator.setText(hasSession ? "Passo 6 de 7" : "Acesso ao VigiaEscolar");
             stepTitleHeader.setText("Entrar no VigiaEscolar");
         } else if (step == WIZ_REGISTER) {
             stepIndicator.setText("Passo 7 de 7");
@@ -464,6 +470,23 @@ public class MainActivity extends Activity {
             showStep(WIZ_MY_CAMERAS);
             renderMyCameras();
         }), dp(10)));
+
+        // Botão Sair discreto
+        Button signOutBtn = new Button(this);
+        signOutBtn.setText("Sair");
+        signOutBtn.setAllCaps(false);
+        signOutBtn.setTextColor(COLOR_MUTED);
+        signOutBtn.setBackgroundColor(Color.TRANSPARENT);
+        signOutBtn.setTextSize(13);
+        signOutBtn.setOnClickListener(v -> {
+            new android.app.AlertDialog.Builder(this)
+                .setTitle("Sair do VigiaEscolar?")
+                .setMessage("Você precisará entrar novamente com seu e-mail e senha.")
+                .setPositiveButton("Sair", (d, w) -> signOutAndGoToLogin())
+                .setNegativeButton("Cancelar", null)
+                .show();
+        });
+        page.addView(gap(signOutBtn, dp(40)));
 
         return page;
     }
@@ -693,6 +716,7 @@ public class MainActivity extends Activity {
 
     // ── Página 6: Login VigiaEscolar ──────────────────────────────────────────
     private Button loginEntrarBtn;
+    private Button loginBackBtn;
     private TextView loginApiStatusLabel;
 
     private View buildPageLogin() {
@@ -734,11 +758,11 @@ public class MainActivity extends Activity {
         btnRow.setOrientation(LinearLayout.HORIZONTAL);
         btnRow.setLayoutParams(matchWrap(0, dp(22), 0, 0));
 
-        Button backBtn = secondaryBtn("Voltar", v -> showStep(WIZ_SUCCESS));
+        loginBackBtn = secondaryBtn("Voltar", v -> showStep(WIZ_SUCCESS));
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         bp.rightMargin = dp(6);
-        backBtn.setLayoutParams(bp);
-        btnRow.addView(backBtn);
+        loginBackBtn.setLayoutParams(bp);
+        btnRow.addView(loginBackBtn);
 
         loginEntrarBtn = primaryBtn("Entrar", v -> {
             String email = emailInput.getText().toString().trim();
@@ -868,7 +892,13 @@ public class MainActivity extends Activity {
         Runnable poll = new Runnable() {
             @Override public void run() {
                 if (apiToken != null && !apiToken.isEmpty()) {
-                    showStep(WIZ_REGISTER);
+                    // Se há câmera em meio ao fluxo de configuração, vai para Register.
+                    // Senão, login foi pelo gate inicial — vai para Welcome.
+                    if (selectedCameraMac != null && !selectedCameraMac.isEmpty()) {
+                        showStep(WIZ_REGISTER);
+                    } else {
+                        showStep(WIZ_WELCOME);
+                    }
                     return;
                 }
                 if (++waits[0] < 24) mainHandler.postDelayed(this, 500);
@@ -2663,8 +2693,70 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    /**
+     * Tenta restaurar sessão salva (token + URL persistidos). Se válido,
+     * usuário fica no Welcome. Caso contrário, leva para a tela de login
+     * como gate de entrada do app.
+     */
+    private void tryRestoreSessionOrGoToLogin() {
+        android.content.SharedPreferences prefs = getSharedPreferences("vigiaescolar", MODE_PRIVATE);
+        final String token = prefs.getString("api_token", "");
+        final String url   = prefs.getString("api_url",   "");
+        if (token.isEmpty() || url.isEmpty()) {
+            openLoginPage();
+            return;
+        }
+        // Validação em background: GET /schools com Bearer; se 2xx, sessão OK
+        pool.execute(() -> {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(url + "/schools").openConnection();
+                c.setRequestMethod("GET");
+                c.setRequestProperty("Authorization", "Bearer " + token);
+                c.setConnectTimeout(3000); c.setReadTimeout(4000);
+                int code = c.getResponseCode();
+                if (code >= 200 && code < 300) {
+                    apiToken = token;
+                    String raw = readStream(c.getInputStream()).trim();
+                    JSONArray arr = raw.startsWith("[") ? new JSONArray(raw)
+                            : new JSONObject(raw).optJSONArray("data");
+                    if (arr == null) arr = new JSONArray();
+                    final JSONArray finalArr = arr;
+                    runOnUiThread(() -> {
+                        // Pré-popula lista de escolas para o Register vir já pronto
+                        if (schoolList != null) showSchools(finalArr);
+                        // Mantém Welcome (default em buildUi)
+                    });
+                } else {
+                    // Token expirado/inválido — limpa e força login
+                    getSharedPreferences("vigiaescolar", MODE_PRIVATE).edit()
+                        .remove("api_token").apply();
+                    runOnUiThread(this::openLoginPage);
+                }
+            } catch (Exception e) {
+                // Sem rede ou servidor fora — exige login novo
+                runOnUiThread(this::openLoginPage);
+            }
+        });
+    }
+
+    /** Logout: limpa token e devolve para a tela de login. */
+    private void signOutAndGoToLogin() {
+        apiToken = null;
+        selectedSchoolId = null;
+        getSharedPreferences("vigiaescolar", MODE_PRIVATE).edit()
+            .remove("api_token").apply();
+        if (appPasswordInput != null) appPasswordInput.setText("");
+        toast("Sessão encerrada");
+        openLoginPage();
+    }
+
     /** Abre tela de login e dispara auto-detecção da API em background. */
     private void openLoginPage() {
+        // Se não houver token (gate inicial / logout), esconde o Voltar pois não há para onde voltar
+        if (loginBackBtn != null) {
+            boolean hasSession = apiToken != null && !apiToken.isEmpty();
+            loginBackBtn.setVisibility(hasSession ? View.VISIBLE : View.GONE);
+        }
         showStep(WIZ_LOGIN);
         // Se já tinha URL salva, valida ela primeiro; senão varre a subnet
         String savedUrl = apiUrlInput != null ? apiUrlInput.getText().toString().trim() : "";
@@ -2724,6 +2816,12 @@ public class MainActivity extends Activity {
                 String token = findToken(new JSONObject(readStream(c.getInputStream())));
                 if (token.isEmpty()) throw new Exception("Token não encontrado na resposta");
                 apiToken = token;
+                // Persiste sessão para o usuário não precisar logar a cada abertura
+                getSharedPreferences("vigiaescolar", MODE_PRIVATE).edit()
+                    .putString("api_url", url)
+                    .putString("api_email", email)
+                    .putString("api_token", token)
+                    .apply();
                 runOnUiThread(() -> {
                     setChip(statusApi, "Conectado ✓", COLOR_GREEN);
                     toast("Login realizado");
