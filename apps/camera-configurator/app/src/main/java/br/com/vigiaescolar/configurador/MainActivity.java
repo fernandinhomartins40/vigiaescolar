@@ -637,74 +637,49 @@ public class MainActivity extends Activity {
             device = cached;
         }
 
-        // Dispositivos tipo=0 (DEVICE_TYPE_UNKNOWN) causam bloqueio silencioso do connectGatt
-        // no Xiaomi MIUI/HyperOS API 31+. Solução: createBond() primeiro para registrar o
-        // device no stack BT do Android (muda tipo 0→2) e só então chamar connectGatt.
-        try {
-            int bondState = device.getBondState();
-            logBle("Bond state atual: " + bondState + " (10=none, 11=bonding, 12=bonded)");
-
-            if (bondState == BluetoothDevice.BOND_BONDED) {
-                logBle("Já emparelhado. Conectando diretamente...");
-                doConnectGatt(device);
-                return;
-            }
-
-            logBle("Iniciando createBond() para registrar device no stack BT...");
-            setChip(statusBle, "Emparelhando...", COLOR_BLUE_MED);
-            unregisterBondReceiver();
-            bondReceiver = new BroadcastReceiver() {
-                @Override
+        // Câmeras XM retornam DEVICE_TYPE_UNKNOWN (tipo=0) no scan.
+        // Dispositivos tipo=0 no Xiaomi MIUI/HyperOS bloqueiam connectGatt silenciosamente
+        // com autoConnect=false. A solução é usar autoConnect=true na primeira chamada —
+        // isso registra o device no stack BT do Android. Quando onConnectionStateChange
+        // disparar (conectado ou erro), fecha o gatt e reconecta com autoConnect=false.
+        // Se autoConnect=true não disparar em 8s, tenta direto com autoConnect=false.
+        if (device.getType() == BluetoothDevice.DEVICE_TYPE_UNKNOWN) {
+            logBle("Tipo=0 detectado. Registrando device via autoConnect=true por 3s...");
+            setChip(statusBle, "Registrando...", COLOR_BLUE_MED);
+            BluetoothGatt[] preGatt = new BluetoothGatt[1];
+            boolean[] registered = {false};
+            BluetoothGattCallback preCallback = new BluetoothGattCallback() {
                 @SuppressLint("MissingPermission")
-                public void onReceive(Context ctx, Intent intent) {
-                    BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                    if (d == null || !d.getAddress().equals(mac)) return;
-                    int newBondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1);
-                    int prevBondState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1);
-                    runOnUiThread(() -> logBle("Bond state changed: " + prevBondState + " → " + newBondState));
-                    if (newBondState == BluetoothDevice.BOND_BONDED) {
-                        runOnUiThread(() -> logBle("✓ Bond OK. Conectando via GATT..."));
-                        unregisterBondReceiver();
-                        mainHandler.postDelayed(() -> doConnectGatt(d), 600);
-                    } else if (newBondState == BluetoothDevice.BOND_NONE && prevBondState == BluetoothDevice.BOND_BONDING) {
-                        runOnUiThread(() -> logBle("⚠ Bond falhou/cancelado. Tentando connectGatt sem bond..."));
-                        unregisterBondReceiver();
-                        mainHandler.postDelayed(() -> doConnectGatt(d), 600);
-                    }
+                @Override
+                public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+                    runOnUiThread(() -> logBle("Pre-connect onConnectionStateChange status=" + status + " newState=" + newState));
+                    registered[0] = true;
+                    try { gatt.disconnect(); } catch (Exception ignored) {}
+                    mainHandler.postDelayed(() -> {
+                        try { gatt.close(); } catch (Exception ignored) {}
+                        if (preGatt[0] == gatt) preGatt[0] = null;
+                        runOnUiThread(() -> logBle("Device registrado. Reconectando com autoConnect=false..."));
+                        mainHandler.postDelayed(() -> doConnectGatt(device), 500);
+                    }, 300);
                 }
             };
-            IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
-            // Android 14+ (API 34) exige flag explícita; broadcasts do sistema = RECEIVER_EXPORTED
-            if (Build.VERSION.SDK_INT >= 34) {
-                registerReceiver(bondReceiver, filter, Context.RECEIVER_EXPORTED);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                preGatt[0] = device.connectGatt(this, true, preCallback, BluetoothDevice.TRANSPORT_LE);
             } else {
-                registerReceiver(bondReceiver, filter);
+                preGatt[0] = device.connectGatt(this, true, preCallback);
             }
-            boolean bondOk = device.createBond();
-            logBle("createBond() retornou: " + bondOk);
-            if (!bondOk) {
-                logBle("createBond() retornou false — tentando connectGatt direto...");
-                unregisterBondReceiver();
-                doConnectGatt(device);
-            } else {
-                // Timeout de bond: 15s
-                mainHandler.postDelayed(() -> {
-                    if (!bleConnected && bondReceiver != null) {
-                        logBle("⚠ Timeout bond 15s — tentando connectGatt mesmo assim...");
-                        unregisterBondReceiver();
-                        doConnectGatt(device);
-                    }
-                }, 15_000);
-            }
-        } catch (SecurityException se) {
-            logBle("✗ SecurityException em createBond: " + se.getMessage());
-            logBle("  → Tentando connectGatt direto sem bond...");
-            unregisterBondReceiver();
+            logBle("autoConnect=true retornou: " + (preGatt[0] != null ? "OK" : "NULL"));
+            // Após 8s sem resposta, tenta direto com autoConnect=false
+            mainHandler.postDelayed(() -> {
+                if (!bleConnected && !registered[0]) {
+                    runOnUiThread(() -> logBle("Timeout registro 8s. Tentando autoConnect=false direto..."));
+                    try { if (preGatt[0] != null) { preGatt[0].disconnect(); preGatt[0].close(); preGatt[0] = null; } } catch (Exception ignored) {}
+                    mainHandler.postDelayed(() -> doConnectGatt(device), 300);
+                }
+            }, 8_000);
+        } else {
+            logBle("Tipo=" + device.getType() + ". Conectando diretamente...");
             doConnectGatt(device);
-        } catch (Exception e) {
-            logBle("✗ Erro inesperado ao conectar: " + e.getClass().getSimpleName() + ": " + e.getMessage());
-            bleConnecting = false;
-            setChip(statusBle, "Erro ao conectar", Color.rgb(185, 28, 28));
         }
     }
 
