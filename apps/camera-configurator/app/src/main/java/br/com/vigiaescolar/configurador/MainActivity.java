@@ -113,12 +113,37 @@ public class MainActivity extends Activity {
     private static final UUID UUID_CCCD     = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
     // ─── FunID BLE ────────────────────────────────────────────────────────────
-    private static final byte FUN_AUTH_REQ  = 0x01;
-    private static final byte FUN_AUTH_RSP  = 0x02;
-    private static final byte FUN_WIFI_CFG  = 0x03;
-    private static final byte FUN_WIFI_RSP  = 0x04;
-    private static final byte FUN_DEV_INFO  = 0x05;
-    private static final byte BLE_HEAD      = (byte) 0xAB;
+    // ─── Frame XM BLE (engenharia reversa de XMBleData + e.x.f no APK iCSee) ─
+    //
+    // Estrutura REAL do frame (descoberta via parseData no bytecode):
+    //   [HEAD: 2 bytes = 0x8B 0x8B]
+    //   [VERSION: 1 byte = 0x01]
+    //   [CMD_ID:  1 byte = 0x01 SEND | 0x02 RECEIVE | 0x03 CALLBACK]
+    //   [FUN_ID:  2 bytes big-endian = 0x0001 GET_NET_STATE | 0x0002 WIFI_BY_BLE | 0x0003 WIFI_BY_AP]
+    //   [DATA_TYPE: 1 byte = 0x00 BIN_ENC | 0x01 STR_ENC | 0x02 BIN_NOENC]
+    //   [CONTENT_LEN: 2 bytes big-endian]
+    //   [CONTENT: N bytes]
+    //   [CHECKSUM: 1 byte = soma de TODOS os bytes anteriores mod 256]
+    //
+    // Header é 0x8B 0x8B (não 0xAB como assumimos), FunId é 16-bit big-endian
+    // (não 8-bit little-endian), e checksum é SOMA, não XOR.
+    private static final byte BLE_HEAD_1    = (byte) 0x8B;
+    private static final byte BLE_HEAD_2    = (byte) 0x8B;
+
+    // CmdId
+    private static final byte CMD_SEND      = 0x01;
+    private static final byte CMD_RECEIVE   = 0x02;
+    private static final byte CMD_CALLBACK  = 0x03;
+
+    // FunId (16-bit big-endian no frame)
+    private static final int FUN_GET_NETWORK_STATE   = 0x0001;
+    private static final int FUN_CONNECT_WIFI_BY_BLE = 0x0002;
+    private static final int FUN_CONNECT_WIFI_BY_AP  = 0x0003;
+
+    // DataType
+    private static final byte DT_BINARY_ENCRYPTION   = 0x00;
+    private static final byte DT_STRING_ENCRYPTION   = 0x01;
+    private static final byte DT_BINARY_NO_ENCRYPTION = 0x02;
 
     // ─── Protocolo DVRIP (fallback AP) ────────────────────────────────────────
     private static final String XM_AP_IP    = "192.168.10.1";
@@ -976,13 +1001,13 @@ public class MainActivity extends Activity {
         @SuppressLint("MissingPermission")
         @Override
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
-            runOnUiThread(() -> logBle("CCCD write status=" + status + ". Aguardando DEV_INFO da câmera..."));
-            // NÃO enviamos auth aqui. O protocolo XM exige aguardar o DEV_INFO que a câmera
-            // envia por conta própria após notify habilitado. Timeout de 5s como fallback.
+            runOnUiThread(() -> logBle("CCCD write status=" + status + ". Aguardando frame inicial da câmera..."));
+            // Câmera envia GET_NETWORK_STATE callback automaticamente após notify habilitado.
+            // Timeout 5s: se nada chegar, envia CONNECT_WIFI direto.
             mainHandler.postDelayed(() -> {
-                if (bleConnected && connectedDevSn == null && bleGatt == gatt) {
-                    runOnUiThread(() -> logBle("Timeout aguardando DEV_INFO — tentando auth com SN vazio..."));
-                    sendAuthFrame(gatt);
+                if (bleConnected && !authPasswordSent && bleGatt == gatt) {
+                    runOnUiThread(() -> logBle("Timeout 5s sem frame inicial — enviando CONNECT_WIFI direto..."));
+                    sendConnectWifiByBle(gatt);
                 }
             }, 5_000);
         }
@@ -1013,97 +1038,101 @@ public class MainActivity extends Activity {
     private void processIncoming(BluetoothGatt gatt, byte[] data) {
         // Log raw hex para diagnóstico
         StringBuilder hex = new StringBuilder();
-        int show = Math.min(data.length, 16);
+        int show = Math.min(data.length, 32);
         for (int i = 0; i < show; i++) hex.append(String.format("%02X ", data[i]));
-        String hexStr = hex.toString().trim() + (data.length > 16 ? "..." : "");
+        String hexStr = hex.toString().trim() + (data.length > 32 ? "..." : "");
         runOnUiThread(() -> logBle("← BLE [" + data.length + "b] " + hexStr));
 
-        if (data.length < 2) return;
-        byte funId = data[1];
+        // Parse do frame XM real: 8B 8B VER CMD FUN(2) DT LEN(2) CONTENT CSUM
+        if (data.length < 10) {
+            runOnUiThread(() -> logBle("  frame curto demais (" + data.length + "b) — ignorando"));
+            return;
+        }
+        if ((data[0] & 0xFF) != 0x8B || (data[1] & 0xFF) != 0x8B) {
+            runOnUiThread(() -> logBle("  header inválido (esperado 8B 8B)"));
+            return;
+        }
+        int version    = data[2] & 0xFF;
+        int cmdId      = data[3] & 0xFF;
+        int funId      = ((data[4] & 0xFF) << 8) | (data[5] & 0xFF);
+        int dataType   = data[6] & 0xFF;
+        int contentLen = ((data[7] & 0xFF) << 8) | (data[8] & 0xFF);
+        runOnUiThread(() -> logBle("  ver=" + version + " cmd=" + cmdId + " fun=0x" + String.format("%04X", funId) + " dt=" + dataType + " len=" + contentLen));
 
-        runOnUiThread(() -> {
-            if (funId == FUN_AUTH_RSP) {
-                handleAuthResponse(gatt, data);
-            } else if (funId == FUN_WIFI_RSP) {
-                handleWifiResponse(data);
-            } else if (funId == FUN_DEV_INFO) {
-                handleDevInfo(gatt, data);
+        if (9 + contentLen + 1 > data.length) {
+            runOnUiThread(() -> logBle("  frame truncado (esperava " + (9 + contentLen + 1) + "b, recebeu " + data.length + "b)"));
+            return;
+        }
+
+        byte[] content = new byte[contentLen];
+        if (contentLen > 0) System.arraycopy(data, 9, content, 0, contentLen);
+
+        // Valida checksum (soma de todos bytes anteriores mod 256)
+        int sumCalc = 0;
+        for (int i = 0; i < 9 + contentLen; i++) sumCalc = (sumCalc + (data[i] & 0xFF)) & 0xFF;
+        final int calc = sumCalc;
+        final int recvCsum = data[9 + contentLen] & 0xFF;
+        if (calc != recvCsum) {
+            runOnUiThread(() -> logBle("  ⚠ checksum mismatch (calc=" + calc + " recv=" + recvCsum + ") — processando mesmo assim"));
+        }
+
+        runOnUiThread(() -> handleXmFrame(gatt, cmdId, funId, dataType, content));
+    }
+
+    /**
+     * Processa frame XM já parseado.
+     * cmdId: 1=SEND 2=RECEIVE 3=CALLBACK
+     * funId: 0x0001=GET_NETWORK_STATE, 0x0002=CONNECT_WIFI_BY_BLE, 0x0003=CONNECT_WIFI_BY_AP
+     */
+    private void handleXmFrame(BluetoothGatt gatt, int cmdId, int funId, int dataType, byte[] content) {
+        if (funId == FUN_GET_NETWORK_STATE) {
+            // Câmera envia/responde estado de rede. Se cmdId=CALLBACK (3) e content[0]=0,
+            // pode significar "online". Vamos logar e enviar Connect WiFi.
+            if (content.length > 0) {
+                logBle("Network state: " + (content[0] & 0xFF));
+            }
+            // Após handshake inicial (câmera mandou GET_NETWORK_STATE callback),
+            // podemos enviar nosso CONNECT_WIFI_BY_BLE
+            if (cmdId == CMD_RECEIVE || cmdId == CMD_CALLBACK) {
+                if (!authPasswordSent) {
+                    logBle("→ Enviando CONNECT_WIFI_BY_BLE...");
+                    sendConnectWifiByBle(gatt);
+                }
+            }
+        } else if (funId == FUN_CONNECT_WIFI_BY_BLE) {
+            // Resposta da câmera ao nosso comando CONNECT_WIFI_BY_BLE
+            int result = content.length > 0 ? (content[0] & 0xFF) : -1;
+            if (result == 0x00) {
+                logBle("✓ Câmera aceitou Wi-Fi! Aguarde conectar (LED fixo).");
+                setChip(statusBle, "Wi-Fi configurado ✓", COLOR_GREEN);
+                mainHandler.postDelayed(this::disconnectBle, 1500);
+                toast("Câmera configurada! Aguarde conectar ao Wi-Fi da escola.");
             } else {
-                // Frame desconhecido — pode ser DEV_INFO com funId diferente neste firmware
-                // Tenta extrair string JSON do payload para diagnóstico
-                if (data.length > 5) {
-                    try {
-                        String raw = new String(data, 5, data.length - 5, StandardCharsets.UTF_8).trim();
-                        if (!raw.isEmpty()) logBle("  payload: " + raw.substring(0, Math.min(raw.length(), 120)));
-                    } catch (Exception ignored) {}
-                }
+                logBle("✗ Câmera recusou WiFi (result=0x" + String.format("%02X", result) + ")");
+                setChip(statusBle, "Falha Wi-Fi", Color.rgb(185, 28, 28));
             }
-        });
-    }
-
-    // ─── Protocolo BLE XM ─────────────────────────────────────────────────────
-
-    @SuppressLint("MissingPermission")
-    private void sendAuthFrame(BluetoothGatt gatt) {
-        String pass  = cameraPassInput.getText().toString().trim();
-        String devSn = connectedDevSn != null ? connectedDevSn : "";
-
-        // Token: AES-CBC-128-PKCS7(key=MD5(sn)[0:16], iv=zeros, plain=pass+random4hex)
-        // Se SN desconhecido, usa key derivada de string vazia (câmera aceita para autenticação inicial)
-        String token = encBleToken(devSn, pass);
-        byte[] payload = token.getBytes(StandardCharsets.UTF_8);
-        byte[] frame   = buildBleFrame(FUN_AUTH_REQ, payload);
-
-        logBle("→ AUTH token=" + token.substring(0, Math.min(token.length(), 16)) + "... SN=" + (devSn.isEmpty() ? "(aguardando)" : devSn));
-        authPasswordSent = true;  // marca que entrou no fluxo de auth (evita reconnect miss_token)
-        writeBluetoothChar(gatt, frame);
-    }
-
-    private void handleAuthResponse(BluetoothGatt gatt, byte[] data) {
-        // Byte 5 = resultado: 0x00 = ok
-        boolean ok = data.length >= 6 && data[5] == 0x00;
-        if (ok) {
-            logBle("✓ Auth aceito. Enviando configuração Wi-Fi...");
-            sendWifiFrame(gatt);
         } else {
-            int ret = data.length >= 6 ? (data[5] & 0xFF) : -1;
-            logBle("✗ Auth recusado (ret=0x" + String.format("%02X", ret) + ")");
-            if (ret == 0x01) logBle("  → Senha da câmera incorreta");
-            else if (ret == 0x02) logBle("  → SN inválido");
-            else logBle("  → Verifique a senha da câmera no campo 'Senha da câmera XM'");
-        }
-    }
-
-    private void handleDevInfo(BluetoothGatt gatt, byte[] data) {
-        // A câmera envia seu SN após notify habilitado
-        // Payload (bytes 5+): JSON ou string com o SN
-        if (data.length > 5) {
-            try {
-                String raw = new String(data, 5, data.length - 5, StandardCharsets.UTF_8).trim();
-                logBle("DEV_INFO payload: " + raw.substring(0, Math.min(raw.length(), 100)));
-                // Tenta extrair SN de JSON {"SN":"...","..."}
-                if (raw.startsWith("{")) {
-                    JSONObject obj = new JSONObject(raw);
-                    String sn = obj.optString("SN", obj.optString("sn", obj.optString("SerialNo", "")));
-                    if (!sn.isEmpty()) connectedDevSn = sn;
-                } else {
-                    // Formato simples: SN direto ou "SN,modelo,..."
-                    connectedDevSn = raw.split("[,;|\\s]")[0].trim();
-                }
-                if (connectedDevSn != null && !connectedDevSn.isEmpty()) {
-                    logBle("Serial da câmera: " + connectedDevSn);
-                }
-            } catch (Exception e) {
-                logBle("DEV_INFO parse error: " + e.getMessage());
+            // funId desconhecido — tenta logar conteúdo como string
+            if (content.length > 0) {
+                try {
+                    String s = new String(content, StandardCharsets.UTF_8).trim();
+                    if (!s.isEmpty()) logBle("  content: " + s.substring(0, Math.min(s.length(), 100)));
+                } catch (Exception ignored) {}
             }
         }
-        // Agora que temos o SN, envia auth
-        mainHandler.removeCallbacksAndMessages(null); // cancela timeout
-        sendAuthFrame(gatt);
     }
 
+    /**
+     * Constrói e envia frame CONNECT_WIFI_BY_BLE conforme bytecode iCSee (e.x.f.a).
+     *
+     * Content format (cada campo prefixado por len-1-byte):
+     *   [ssidLen 1B] [ssidBytes] [pwdLen 1B] [pwdBytes] [encryp 1B]
+     *
+     * Onde encryp é o resultado de e.x.f.b(capabilities):
+     *   0=OPEN  2=WPA_PSK  4=WPA-PSK  6=WPA+PSK  7=WPA3+WPA2+PSK  8=WAPI+PSK
+     */
     @SuppressLint("MissingPermission")
-    private void sendWifiFrame(BluetoothGatt gatt) {
+    private void sendConnectWifiByBle(BluetoothGatt gatt) {
         String ssid     = wifiSsidInput.getText().toString().trim();
         String wifiPass = wifiPassInput.getText().toString().trim();
 
@@ -1112,126 +1141,65 @@ public class MainActivity extends Activity {
             return;
         }
 
-        // Valores confirmados na decompilação do APK iCSee v7.1.1 — usa "WPA2" e não "WPA2PSK"
-        String encrypType = wifiPass.isEmpty() ? "OPEN"    : "WPA2";
-        String keyType    = wifiPass.isEmpty() ? "NONE"    : "AES";
-        String auth       = wifiPass.isEmpty() ? "OPEN"    : "WPA2";
+        byte[] ssidBytes = ssid.getBytes(StandardCharsets.UTF_8);
+        byte[] passBytes = wifiPass.getBytes(StandardCharsets.UTF_8);
+        // Encriptação assumida — para redes da escola típicas WPA2-PSK: 6 (WPA+PSK)
+        // 0 se senha vazia
+        int encryp = wifiPass.isEmpty() ? 0 : 6;
 
-        try {
-            JSONObject wifi = new JSONObject();
-            wifi.put("SSID",       ssid);
-            wifi.put("Keys",       wifiPass);
-            wifi.put("NetType",    "DHCP");
-            wifi.put("EncrypType", encrypType);
-            wifi.put("KeyType",    keyType);
-            wifi.put("Auth",       auth);
-            wifi.put("Enable",     true);
-            wifi.put("HostIP",     "0.0.0.0");
-            wifi.put("GateWay",    "0.0.0.0");
-            wifi.put("Submask",    "255.255.255.0");
+        byte[] content = new byte[1 + ssidBytes.length + 1 + passBytes.length + 1];
+        int offset = 0;
+        content[offset++] = (byte) (ssidBytes.length & 0xFF);
+        System.arraycopy(ssidBytes, 0, content, offset, ssidBytes.length);
+        offset += ssidBytes.length;
+        content[offset++] = (byte) (passBytes.length & 0xFF);
+        System.arraycopy(passBytes, 0, content, offset, passBytes.length);
+        offset += passBytes.length;
+        content[offset] = (byte) (encryp & 0xFF);
 
-            // Wrapper com chave "NetWork.Wifi" como o SDK original usa
-            JSONObject wrapper = new JSONObject();
-            wrapper.put("NetWork.Wifi", wifi);
-
-            byte[] payload = wrapper.toString().getBytes(StandardCharsets.UTF_8);
-            byte[] frame   = buildBleFrame(FUN_WIFI_CFG, payload);
-            writeBluetoothChar(gatt, frame);
-            logBle("→ WiFi cfg enviado: SSID=" + ssid + " enc=" + encrypType);
-        } catch (Exception e) {
-            logBle("✗ Erro ao montar frame WiFi: " + e.getMessage());
-        }
+        byte[] frame = buildBleFrame(CMD_SEND, FUN_CONNECT_WIFI_BY_BLE, DT_BINARY_NO_ENCRYPTION, content);
+        logBle("→ CONNECT_WIFI_BY_BLE SSID='" + ssid + "' enc=" + encryp + " contentLen=" + content.length);
+        authPasswordSent = true;
+        writeBluetoothChar(gatt, frame);
     }
 
-    private void handleWifiResponse(byte[] data) {
-        boolean ok = data.length >= 6 && data[5] == 0x00;
-        if (ok) {
-            logBle("✓ Câmera aceitou a rede Wi-Fi! Aguarde ela conectar (LED fixo).");
-            setChip(statusBle, "Wi-Fi configurado ✓", COLOR_GREEN);
-            mainHandler.postDelayed(this::disconnectBle, 1000);
-            toast("Câmera configurada! Aguarde conectar ao Wi-Fi da escola.");
-        } else {
-            int ret = data.length >= 6 ? (data[5] & 0xFF) : -1;
-            logBle("✗ Câmera recusou WiFi (ret=0x" + String.format("%02X", ret) + "). Verifique SSID/senha.");
-            setChip(statusBle, "Falha Wi-Fi", Color.rgb(185, 28, 28));
-        }
-    }
+    // ─── Protocolo BLE XM (versão real) ──────────────────────────────────────
+    // sendConnectWifiByBle() acima é o ponto principal. Métodos legados removidos
+    // após reescrita do protocolo baseada na decompilação completa de XMBleData
+    // e e.x.f no APK iCSee v7.1.1.
 
     /**
-     * Token de autenticação BLE XM — replica Fun_EncBleToken do libFunSDK.so:
-     *  key  = MD5(sn)[0..15]  (16 bytes, SN como string UTF-8)
-     *  iv   = zeros (16 bytes)
-     *  plain = password + randomHex4  (padded PKCS7 para múltiplo de 16)
-     * Retorna hex string uppercase do ciphertext
-     * Se SN vazio, usa chave derivada da SDK key "alexa20211018"
+     * Frame BLE XM real (validado com bytecode iCSee XMBleData.parseData):
+     *
+     *   [0x8B 0x8B] [VER 1B] [CMD 1B] [FUN 2B BE] [DT 1B] [LEN 2B BE] [CONTENT N] [CSUM 1B]
+     *
+     * CSUM = (soma de TODOS os bytes anteriores) mod 256
+     * Cabeçalho fixo total = 9 bytes; com content e checksum = 10 + content.length bytes
      */
-    private String encBleToken(String sn, String password) {
-        try {
-            // Deriva chave AES: MD5 do SN (16 bytes)
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            String keySource = sn.isEmpty() ? "alexa20211018" : sn;
-            byte[] aesKey = md.digest(keySource.getBytes(StandardCharsets.UTF_8)); // 16 bytes
-
-            // Plaintext: password + salt aleatório de 4 hex chars
-            String salt = String.format(Locale.US, "%04X", new Random().nextInt(0x10000));
-            String plain = password + salt;
-
-            // Encrypt AES-CBC-128-PKCS7
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
-            IvParameterSpec ivSpec = new IvParameterSpec(new byte[16]);
-            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, keySpec, ivSpec);
-            byte[] encrypted = cipher.doFinal(plain.getBytes(StandardCharsets.UTF_8));
-
-            // Converte para hex uppercase
-            StringBuilder sb = new StringBuilder();
-            for (byte b : encrypted) sb.append(String.format("%02X", b));
-            return sb.toString();
-        } catch (Exception e) {
-            logBle("✗ Erro ao gerar token: " + e.getMessage());
-            // Fallback: token vazio (câmera de fábrica pode aceitar)
-            return "";
-        }
+    private byte[] buildBleFrame(byte cmdId, int funId, byte dataType, byte[] content) {
+        int contentLen = content != null ? content.length : 0;
+        byte[] frame = new byte[10 + contentLen];
+        frame[0] = BLE_HEAD_1;
+        frame[1] = BLE_HEAD_2;
+        frame[2] = 0x01;                                     // version
+        frame[3] = cmdId;
+        frame[4] = (byte) ((funId >> 8) & 0xFF);             // FUN hi (big-endian)
+        frame[5] = (byte) (funId & 0xFF);                    // FUN lo
+        frame[6] = dataType;
+        frame[7] = (byte) ((contentLen >> 8) & 0xFF);        // LEN hi (big-endian)
+        frame[8] = (byte) (contentLen & 0xFF);               // LEN lo
+        if (content != null) System.arraycopy(content, 0, frame, 9, contentLen);
+        // checksum = soma de todos os bytes anteriores mod 256
+        int sum = 0;
+        for (int i = 0; i < 9 + contentLen; i++) sum = (sum + (frame[i] & 0xFF)) & 0xFF;
+        frame[9 + contentLen] = (byte) sum;
+        return frame;
     }
 
-    /**
-     * Frame BLE XM: [HEAD=0xAB][VERSION=0x00][FUN_ID_LO][FUN_ID_HI][LEN_LO][LEN_HI][CHECKSUM][DATA]
-     * Estrutura revelada pela análise do APK — 7 bytes de header, não 5.
-     * CHECKSUM = XOR de todos os bytes de HEAD até LEN (inclusive).
-     */
+    // Mantido para chamadas antigas que passavam só (funId, data) — agora delega
     private byte[] buildBleFrame(byte funId, byte[] data) {
-        int dataLen = data != null ? data.length : 0;
-        byte[] frame = new byte[7 + dataLen];
-        frame[0] = BLE_HEAD;      // 0xAB
-        frame[1] = 0x00;          // VERSION
-        frame[2] = funId;         // FUN_ID_LO (16-bit, byte baixo)
-        frame[3] = 0x00;          // FUN_ID_HI
-        frame[4] = (byte) (dataLen & 0xFF);         // LEN_LO
-        frame[5] = (byte) ((dataLen >> 8) & 0xFF);  // LEN_HI
-        // CHECKSUM = XOR dos primeiros 6 bytes do header
-        byte cs = 0;
-        for (int i = 0; i < 6; i++) cs ^= frame[i];
-        frame[6] = cs;
-        if (data != null) System.arraycopy(data, 0, frame, 7, dataLen);
-        return frame;
-    }
-
-    // Mantido para compatibilidade com código de fallback DVRIP
-    @SuppressWarnings("unused")
-    private byte[] buildBleFrameOld(byte funId, byte[] data) {
-        int dataLen = data != null ? data.length : 0;
-        byte[] frame = new byte[5 + dataLen];
-        frame[0] = BLE_HEAD;
-        frame[1] = funId;
-        frame[2] = (byte) (dataLen & 0xFF);
-        frame[3] = (byte) ((dataLen >> 8) & 0xFF);
-        int checksum = 0;
-        for (int i = 0; i < dataLen; i++) {
-            frame[5 + i] = data[i];
-            checksum = (checksum + (data[i] & 0xFF)) & 0xFF;
-        }
-        frame[4] = (byte) checksum;
-        return frame;
+        // legado: assume CMD_SEND + funId byte como if it were 16-bit + DT_BIN_NOENC
+        return buildBleFrame(CMD_SEND, funId & 0xFF, DT_BINARY_NO_ENCRYPTION, data);
     }
 
     @SuppressLint("MissingPermission")
