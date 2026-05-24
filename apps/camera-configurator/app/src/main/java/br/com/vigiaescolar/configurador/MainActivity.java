@@ -895,23 +895,58 @@ public class MainActivity extends Activity {
             // Passo 3: habilitar notify em 0x2b11
             BluetoothGattCharacteristic notifyChar = svc.getCharacteristic(UUID_NOTIFY);
             if (notifyChar == null) {
-                runOnUiThread(() -> logBle("✗ Characteristic notify 0x2b11 não encontrada."));
+                StringBuilder sb = new StringBuilder();
+                for (BluetoothGattCharacteristic c : svc.getCharacteristics()) {
+                    sb.append("\n  char ").append(c.getUuid()).append(" props=0x").append(Integer.toHexString(c.getProperties()));
+                }
+                runOnUiThread(() -> logBle("✗ Notify 0x2b11 não encontrada. Chars disponíveis:" + sb));
                 return;
             }
+            int props = notifyChar.getProperties();
+            runOnUiThread(() -> logBle("Notify char encontrada, props=0x" + Integer.toHexString(props)));
+
             boolean ok = gatt.setCharacteristicNotification(notifyChar, true);
             runOnUiThread(() -> logBle("setCharacteristicNotification: " + ok));
 
-            BluetoothGattDescriptor desc = notifyChar.getDescriptor(UUID_CCCD);
-            if (desc == null) {
-                runOnUiThread(() -> logBle("CCCD não encontrado — aguardando frame da câmera..."));
-                // A câmera envia DEV_INFO primeiro; aguardamos via onCharacteristicChanged
-                return;
+            // Lista TODOS descriptors da char — XM às vezes expõe CCCD com UUID base diferente
+            BluetoothGattDescriptor cccdDesc = notifyChar.getDescriptor(UUID_CCCD);
+            if (cccdDesc == null) {
+                StringBuilder dsb = new StringBuilder();
+                for (BluetoothGattDescriptor d : notifyChar.getDescriptors()) {
+                    dsb.append("\n  descriptor ").append(d.getUuid());
+                }
+                runOnUiThread(() -> logBle("CCCD 0x2902 não retornado. Descriptors disponíveis:" + dsb));
+
+                // Tenta usar o primeiro descriptor disponível (algumas firmwares XM expõem o CCCD com UUID custom)
+                java.util.List<BluetoothGattDescriptor> all = notifyChar.getDescriptors();
+                if (!all.isEmpty()) {
+                    cccdDesc = all.get(0);
+                    final BluetoothGattDescriptor fallbackDesc = cccdDesc;
+                    runOnUiThread(() -> logBle("Usando primeiro descriptor disponível: " + fallbackDesc.getUuid()));
+                }
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+
+            // iCSee escreve ENABLE_NOTIFICATION_VALUE (0x01,0x00) no CCCD para habilitar notify
+            if (cccdDesc != null) {
+                final BluetoothGattDescriptor d = cccdDesc;
+                // Pequeno delay entre setCharacteristicNotification e writeDescriptor — alguns
+                // firmwares XM/Xiaomi precisam disso para registrar a inscrição no stack
+                mainHandler.postDelayed(() -> {
+                    boolean wrote;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        int rc = gatt.writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                        wrote = (rc == BluetoothGatt.GATT_SUCCESS || rc == 0);
+                        logBle("writeDescriptor CCCD (API33+): rc=" + rc);
+                    } else {
+                        d.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                        wrote = gatt.writeDescriptor(d);
+                        logBle("writeDescriptor CCCD: " + wrote);
+                    }
+                    if (!wrote) logBle("⚠ writeDescriptor retornou false — aguardando notify implícito");
+                }, 150);
             } else {
-                desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                gatt.writeDescriptor(desc);
+                // Sem CCCD: alguns firmwares XM mandam DEV_INFO mesmo assim
+                runOnUiThread(() -> logBle("⚠ Sem CCCD — aguardando frame da câmera (notify implícito)..."));
             }
         }
 
