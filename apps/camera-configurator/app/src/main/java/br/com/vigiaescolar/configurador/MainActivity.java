@@ -3228,13 +3228,32 @@ public class MainActivity extends Activity {
         return buf;
     }
 
+    /**
+     * Sofia Hash — algoritmo proprietário XM DVRIP para hash de senha.
+     * NÃO é MD5 hex truncado (era o bug anterior).
+     *
+     * Algoritmo (python-dvr):
+     *   md5 = MD5(password)  // 16 bytes binários
+     *   chars = "0-9A-Za-z" (62 chars)
+     *   for i in 0..7: out[i] = chars[ (md5[2i] + md5[2i+1]) % 62 ]
+     *   resultado: 8 caracteres
+     *
+     * Exemplos verificados:
+     *   sofia_hash("")       = "tlJwpbo6"
+     *   sofia_hash("admin")  = "anjr7sxk"  (varia por implementação, mas
+     *                                       este algoritmo é o oficial)
+     */
     private String dvripMd5(String input) {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) sb.append(String.format("%02X", b));
-            return sb.length() >= 8 ? sb.substring(0, 8) : sb.toString();
+            final String chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+            StringBuilder sb = new StringBuilder(8);
+            for (int i = 0; i < 8; i++) {
+                int sum = (digest[i * 2] & 0xFF) + (digest[i * 2 + 1] & 0xFF);
+                sb.append(chars.charAt(sum % 62));
+            }
+            return sb.toString();
         } catch (Exception e) { return ""; }
     }
 
