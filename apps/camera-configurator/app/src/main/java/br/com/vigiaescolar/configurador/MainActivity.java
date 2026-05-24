@@ -33,10 +33,17 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
+import android.content.ContentValues;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -227,8 +234,9 @@ public class MainActivity extends Activity {
     private static final int WIZ_SUCCESS       = 5;
     private static final int WIZ_LOGIN         = 6;
     private static final int WIZ_REGISTER      = 7;
+    private static final int WIZ_MY_CAMERAS    = 8;
     private FrameLayout wizardContainer;
-    private View[]      wizardPages = new View[8];
+    private View[]      wizardPages = new View[9];
     private int         currentStep = WIZ_WELCOME;
     private TextView    stepIndicator;
     private TextView    stepTitleHeader;
@@ -238,6 +246,10 @@ public class MainActivity extends Activity {
     private String      selectedCameraName = null;
     private String      selectedWifiSsid   = null;
     private String      selectedWifiCaps   = null;  // capabilities da rede WiFi escolhida
+
+    // Câmeras configuradas (persistido em SharedPreferences "cameras")
+    private LinearLayout myCamerasList;
+    private final java.util.Map<String, Bitmap> snapshotCache = new java.util.HashMap<>();
 
     // ─── Widgets ──────────────────────────────────────────────────────────────
     private LinearLayout bleDeviceList;
@@ -288,6 +300,7 @@ public class MainActivity extends Activity {
         disconnectBle();
         unregisterBondReceiver();
         pool.shutdownNow();
+        if (dbHelper != null) { try { dbHelper.close(); } catch (Exception ignored) {} }
         super.onDestroy();
     }
 
@@ -354,6 +367,7 @@ public class MainActivity extends Activity {
         wizardPages[WIZ_SUCCESS]       = buildPageSuccess();
         wizardPages[WIZ_LOGIN]         = buildPageLogin();
         wizardPages[WIZ_REGISTER]      = buildPageRegister();
+        wizardPages[WIZ_MY_CAMERAS]    = buildPageMyCameras();
         for (View page : wizardPages) wizardContainer.addView(page);
 
         // Inicializa também widgets/campos do fluxo legado (modo AP, API, registro)
@@ -384,6 +398,9 @@ public class MainActivity extends Activity {
         } else if (step == WIZ_REGISTER) {
             stepIndicator.setText("Passo 7 de 7");
             stepTitleHeader.setText("Cadastrar câmera");
+        } else if (step == WIZ_MY_CAMERAS) {
+            stepIndicator.setText("Minhas câmeras");
+            stepTitleHeader.setText("Câmeras configuradas");
         } else {
             stepIndicator.setText("Passo " + step + " de 7");
             String[] titles = {"", "Encontrar câmera", "Escolher rede WiFi",
@@ -421,16 +438,12 @@ public class MainActivity extends Activity {
         LinearLayout page = wizardPage();
         page.setGravity(Gravity.CENTER);
 
-        TextView title = tv("Configurar nova câmera", 24, COLOR_BLUE, true);
+        TextView title = tv("Configurador de Câmera", 24, COLOR_BLUE, true);
         title.setGravity(Gravity.CENTER);
         page.addView(title);
 
         TextView desc = muted(
-            "Este assistente vai guiá-lo passo a passo:\n\n" +
-            "1. Encontrar a câmera por Bluetooth\n" +
-            "2. Escolher a rede Wi-Fi da escola\n" +
-            "3. Informar a senha do Wi-Fi\n" +
-            "4. Enviar a configuração\n\n" +
+            "Configure câmeras XM/iCSee no Wi-Fi da escola em poucos passos.\n\n" +
             "Antes de começar:\n" +
             "• Energize a câmera e aguarde o LED piscar (modo de pareamento)\n" +
             "• Ative o Bluetooth e a Localização do celular\n" +
@@ -440,7 +453,16 @@ public class MainActivity extends Activity {
         desc.setPadding(0, dp(16), 0, dp(28));
         page.addView(desc);
 
-        page.addView(primaryBtn("Começar", v -> { showStep(WIZ_FIND_CAMERA); startBleScan(); }));
+        page.addView(primaryBtn("Configurar nova câmera", v -> {
+            showStep(WIZ_FIND_CAMERA);
+            startBleScan();
+        }));
+
+        page.addView(gap(secondaryBtn("Minhas câmeras configuradas", v -> {
+            showStep(WIZ_MY_CAMERAS);
+            renderMyCameras();
+        }), dp(10)));
+
         return page;
     }
 
@@ -462,6 +484,22 @@ public class MainActivity extends Activity {
 
         bleDeviceList = vStack();
         page.addView(gap(bleDeviceList, dp(4)));
+
+        // Aviso: câmera só aparece em modo de pareamento
+        LinearLayout warnBox = new LinearLayout(this);
+        warnBox.setOrientation(LinearLayout.VERTICAL);
+        warnBox.setPadding(dp(12), dp(10), dp(12), dp(10));
+        warnBox.setBackground(rounded(COLOR_WARN_BG, COLOR_WARN_BDR, 10));
+        warnBox.setLayoutParams(matchWrap(0, dp(20), 0, 0));
+        TextView wt = tv("Não aparece nada?", 13, Color.rgb(120, 53, 15), true);
+        warnBox.addView(wt);
+        TextView wd = tv(
+            "Câmeras XM só aparecem no Bluetooth durante o modo de pareamento (LED piscando rápido).\n\n" +
+            "Se a câmera já foi configurada antes, faça um RESET: segure o botão de reset por 5 a 10 segundos até o LED voltar a piscar.",
+            12, Color.rgb(120, 53, 15), false);
+        wd.setPadding(0, dp(4), 0, 0);
+        warnBox.addView(wd);
+        page.addView(warnBox);
 
         return wizardScrollPage(page);
     }
@@ -792,6 +830,401 @@ public class MainActivity extends Activity {
             resetWizardState();
             showStep(WIZ_WELCOME);
         }, 1800);
+    }
+
+    // ── Página 8: Minhas câmeras (persistidas localmente) ─────────────────────
+    private View buildPageMyCameras() {
+        LinearLayout page = wizardPage();
+
+        page.addView(wizardHeading("Minhas câmeras"));
+        page.addView(muted("Câmeras já configuradas neste celular. Toque em \"Atualizar\" para tentar carregar a miniatura."));
+
+        myCamerasList = vStack();
+        page.addView(gap(myCamerasList, dp(14)));
+
+        page.addView(gap(secondaryBtn("Voltar ao início", v -> showStep(WIZ_WELCOME)), dp(20)));
+
+        return wizardScrollPage(page);
+    }
+
+    private void renderMyCameras() {
+        if (myCamerasList == null) return;
+        myCamerasList.removeAllViews();
+        JSONArray cams = loadSavedCameras();
+        if (cams.length() == 0) {
+            myCamerasList.addView(muted("Nenhuma câmera configurada ainda. Use \"Configurar nova câmera\" para começar."));
+            return;
+        }
+        for (int i = 0; i < cams.length(); i++) {
+            JSONObject c = cams.optJSONObject(i);
+            if (c != null) myCamerasList.addView(buildCameraCard(c));
+        }
+    }
+
+    private View buildCameraCard(JSONObject cam) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        card.setBackground(rounded(COLOR_CARD, COLOR_BORDER, 12));
+        card.setLayoutParams(matchWrap(0, 0, 0, dp(12)));
+
+        String name = cam.optString("name", cam.optString("ssid", "Câmera"));
+        String ssid = cam.optString("ssid", "");
+        String mac  = cam.optString("mac", "");
+        String sn   = cam.optString("sn", "");
+        String ip   = cam.optString("ip", "");
+        long   when = cam.optLong("when", 0L);
+
+        TextView tName = tv(name, 16, COLOR_BLUE, true);
+        card.addView(tName);
+
+        TextView tInfo = tv(
+            (ssid.isEmpty() ? "" : "Wi-Fi: " + ssid + "\n") +
+            (mac.isEmpty()  ? "" : "MAC: " + mac + "\n") +
+            (sn.isEmpty()   ? "" : "SN: " + sn + "\n") +
+            (ip.isEmpty()   ? "IP: ainda não detectado" : "IP: " + ip) +
+            (when > 0 ? "\nConfigurada em: " + formatDate(when) : ""),
+            11, COLOR_MUTED, false);
+        tInfo.setPadding(0, dp(4), 0, dp(10));
+        card.addView(tInfo);
+
+        // Miniatura (snapshot)
+        ImageView thumb = new ImageView(this);
+        thumb.setBackgroundColor(Color.rgb(15, 23, 42));
+        thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(180));
+        tp.topMargin = dp(4);
+        thumb.setLayoutParams(tp);
+        // Placeholder texto via fundo escuro + ícone
+        TextView placeholder = tv("📷 sem miniatura — toque em \"Atualizar miniatura\"", 11, Color.argb(150, 255, 255, 255), false);
+        placeholder.setGravity(Gravity.CENTER);
+        FrameLayout thumbWrap = new FrameLayout(this);
+        thumbWrap.setLayoutParams(tp);
+        thumbWrap.addView(thumb, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        thumbWrap.addView(placeholder, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        card.addView(thumbWrap);
+
+        Bitmap cached = snapshotCache.get(mac);
+        if (cached == null) {
+            // Tenta carregar do banco SQLite (snapshot BLOB persistido)
+            cached = loadSnapshotFromDisk(mac);
+            if (cached != null) snapshotCache.put(mac, cached);
+        }
+        if (cached != null) {
+            thumb.setImageBitmap(cached);
+            placeholder.setVisibility(View.GONE);
+        }
+
+        // Linha de botões
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setLayoutParams(matchWrap(0, dp(12), 0, 0));
+
+        Button refreshBtn = secondaryBtn("Atualizar miniatura", v -> {
+            placeholder.setVisibility(View.VISIBLE);
+            placeholder.setText("⏳ buscando câmera na rede...");
+            fetchSnapshotAsync(cam, thumb, placeholder);
+        });
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bp.rightMargin = dp(6);
+        refreshBtn.setLayoutParams(bp);
+        btnRow.addView(refreshBtn);
+
+        Button delBtn = secondaryBtn("Remover", v -> {
+            deleteCamera(mac);
+            renderMyCameras();
+            toast("Câmera removida");
+        });
+        LinearLayout.LayoutParams dpp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        dpp.leftMargin = dp(6);
+        delBtn.setLayoutParams(dpp);
+        btnRow.addView(delBtn);
+
+        card.addView(btnRow);
+
+        return card;
+    }
+
+    private String formatDate(long ts) {
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", new java.util.Locale("pt", "BR"));
+        return sdf.format(new java.util.Date(ts));
+    }
+
+    // ── Persistência de câmeras ───────────────────────────────────────────────
+
+    // ── Banco local SQLite ────────────────────────────────────────────────────
+    // Banco SQLite em getDatabasePath() — sobrevive a atualizações do APK,
+    // suporta upgrade de schema, é o storage local padrão Android para dados
+    // estruturados. Snapshot armazenado como BLOB na própria tabela, então
+    // tudo está num único arquivo (cameras.db) — fácil de fazer backup/export.
+
+    private static class CamerasDb extends SQLiteOpenHelper {
+        static final String DB_NAME    = "cameras.db";
+        static final int    DB_VERSION = 1;
+        static final String TABLE      = "cameras";
+
+        CamerasDb(android.content.Context ctx) { super(ctx, DB_NAME, null, DB_VERSION); }
+
+        @Override
+        public void onCreate(SQLiteDatabase db) {
+            db.execSQL(
+                "CREATE TABLE " + TABLE + " (" +
+                "  mac           TEXT PRIMARY KEY," +
+                "  name          TEXT NOT NULL," +
+                "  ssid          TEXT," +
+                "  sn            TEXT," +
+                "  ip            TEXT," +
+                "  configured_at INTEGER NOT NULL," +
+                "  snapshot      BLOB," +
+                "  snapshot_at   INTEGER" +
+                ")"
+            );
+        }
+
+        @Override
+        public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+            // Versão 1 inicial — sem upgrades ainda
+        }
+    }
+
+    private CamerasDb dbHelper;
+
+    private CamerasDb db() {
+        if (dbHelper == null) dbHelper = new CamerasDb(getApplicationContext());
+        return dbHelper;
+    }
+
+    private void saveConfiguredCamera() {
+        try {
+            String mac = selectedCameraMac != null ? selectedCameraMac : "";
+            if (mac.isEmpty()) return;
+
+            // Preserva campos antigos (snapshot, ip) se já existir
+            JSONObject existing = findCamera(mac);
+
+            ContentValues cv = new ContentValues();
+            cv.put("mac",  mac);
+            cv.put("name", selectedCameraName != null ? selectedCameraName : "Câmera XM");
+            cv.put("ssid", selectedWifiSsid != null ? selectedWifiSsid : "");
+            cv.put("sn",   connectedDevSn != null && !connectedDevSn.isEmpty()
+                    ? connectedDevSn
+                    : (existing != null ? existing.optString("sn", "") : ""));
+            cv.put("ip",   existing != null ? existing.optString("ip", "") : "");
+            cv.put("configured_at", System.currentTimeMillis());
+
+            SQLiteDatabase d = db().getWritableDatabase();
+            d.insertWithOnConflict(CamerasDb.TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+
+            int total = countCameras();
+            logBle("✓ Câmera salva no SQLite (total: " + total + ")");
+        } catch (Exception e) {
+            logBle("Erro ao salvar câmera: " + e.getMessage());
+        }
+    }
+
+    private int countCameras() {
+        Cursor c = db().getReadableDatabase().rawQuery("SELECT COUNT(*) FROM " + CamerasDb.TABLE, null);
+        try { return c.moveToFirst() ? c.getInt(0) : 0; }
+        finally { c.close(); }
+    }
+
+    /** Carrega todas as câmeras como JSONArray (mantém API antiga para renderMyCameras). */
+    private JSONArray loadSavedCameras() {
+        JSONArray arr = new JSONArray();
+        Cursor c = null;
+        try {
+            c = db().getReadableDatabase().query(CamerasDb.TABLE,
+                new String[]{"mac", "name", "ssid", "sn", "ip", "configured_at", "snapshot_at"},
+                null, null, null, null, "configured_at DESC");
+            while (c.moveToNext()) {
+                JSONObject o = new JSONObject();
+                o.put("mac",  c.getString(0));
+                o.put("name", c.getString(1));
+                o.put("ssid", c.isNull(2) ? "" : c.getString(2));
+                o.put("sn",   c.isNull(3) ? "" : c.getString(3));
+                o.put("ip",   c.isNull(4) ? "" : c.getString(4));
+                o.put("when", c.getLong(5));
+                o.put("snapshotAt", c.isNull(6) ? 0L : c.getLong(6));
+                arr.put(o);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        return arr;
+    }
+
+    private JSONObject findCamera(String mac) {
+        if (mac == null) return null;
+        Cursor c = null;
+        try {
+            c = db().getReadableDatabase().query(CamerasDb.TABLE,
+                new String[]{"mac", "name", "ssid", "sn", "ip", "configured_at"},
+                "mac = ? COLLATE NOCASE", new String[]{mac}, null, null, null);
+            if (c.moveToFirst()) {
+                JSONObject o = new JSONObject();
+                o.put("mac",  c.getString(0));
+                o.put("name", c.getString(1));
+                o.put("ssid", c.isNull(2) ? "" : c.getString(2));
+                o.put("sn",   c.isNull(3) ? "" : c.getString(3));
+                o.put("ip",   c.isNull(4) ? "" : c.getString(4));
+                o.put("when", c.getLong(5));
+                return o;
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        return null;
+    }
+
+    private void deleteCamera(String mac) {
+        try {
+            db().getWritableDatabase()
+                .delete(CamerasDb.TABLE, "mac = ? COLLATE NOCASE", new String[]{mac});
+            snapshotCache.remove(mac);
+        } catch (Exception ignored) {}
+    }
+
+    private void updateSavedCameraIp(String mac, String ip) {
+        try {
+            ContentValues cv = new ContentValues();
+            cv.put("ip", ip);
+            db().getWritableDatabase()
+                .update(CamerasDb.TABLE, cv, "mac = ? COLLATE NOCASE", new String[]{mac});
+        } catch (Exception ignored) {}
+    }
+
+    private void saveSnapshotToDisk(String mac, Bitmap bmp) {
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            bmp.compress(Bitmap.CompressFormat.JPEG, 80, baos);
+            ContentValues cv = new ContentValues();
+            cv.put("snapshot",    baos.toByteArray());
+            cv.put("snapshot_at", System.currentTimeMillis());
+            db().getWritableDatabase()
+                .update(CamerasDb.TABLE, cv, "mac = ? COLLATE NOCASE", new String[]{mac});
+        } catch (Exception ignored) {}
+    }
+
+    private Bitmap loadSnapshotFromDisk(String mac) {
+        if (mac == null) return null;
+        Cursor c = null;
+        try {
+            c = db().getReadableDatabase().query(CamerasDb.TABLE,
+                new String[]{"snapshot"},
+                "mac = ? COLLATE NOCASE", new String[]{mac}, null, null, null);
+            if (c.moveToFirst() && !c.isNull(0)) {
+                byte[] bytes = c.getBlob(0);
+                if (bytes != null && bytes.length > 0) {
+                    return BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        return null;
+    }
+
+    // ── Snapshot HTTP (sem RTSP — usa endpoints comuns XM/ONVIF) ─────────────
+    // Câmeras XM/iCSee modernas expõem snapshot JPEG via HTTP em portas como
+    // 80 e 8899. Como o IP pode mudar, varremos a subnet local procurando
+    // a câmera pelo MAC (ARP) ou pelo SN (DVRIP scan).
+
+    private void fetchSnapshotAsync(final JSONObject cam, final ImageView thumb, final TextView placeholder) {
+        final String savedMac = cam.optString("mac", "");
+        final String savedSn  = cam.optString("sn", "");
+        String savedIp        = cam.optString("ip", "");
+
+        pool.execute(() -> {
+            String ip = savedIp;
+            // Se não tem IP salvo, tenta descobrir por DVRIP scan na subnet
+            if (ip.isEmpty()) {
+                ip = findCameraIpOnLan(savedSn, savedMac);
+                if (ip != null && !ip.isEmpty()) {
+                    updateSavedCameraIp(savedMac, ip);
+                }
+            }
+            if (ip == null || ip.isEmpty()) {
+                runOnUiThread(() -> placeholder.setText("Câmera não encontrada na rede.\nConfirme que ela está ligada e no mesmo Wi-Fi."));
+                return;
+            }
+            final String finalIp = ip;
+            // Tenta endpoints comuns de snapshot JPG
+            String[] urls = {
+                "http://" + ip + "/cgi-bin/snapshot.cgi",
+                "http://" + ip + ":8080/cgi-bin/snapshot.cgi",
+                "http://" + ip + ":8899/snapshot.cgi",
+                "http://" + ip + "/snapshot.jpg",
+                "http://" + ip + "/jpg/image.jpg",
+                "http://" + ip + ":80/onvif-http/snapshot",
+            };
+            Bitmap bmp = null;
+            String tried = "";
+            for (String url : urls) {
+                bmp = downloadJpeg(url);
+                if (bmp != null) { tried = url; break; }
+            }
+            final Bitmap finalBmp = bmp;
+            final String triedUrl = tried;
+            // Persiste no SQLite (BLOB) para sobreviver reinicialização
+            if (bmp != null) saveSnapshotToDisk(savedMac, bmp);
+            runOnUiThread(() -> {
+                if (finalBmp != null) {
+                    snapshotCache.put(savedMac, finalBmp);
+                    thumb.setImageBitmap(finalBmp);
+                    placeholder.setVisibility(View.GONE);
+                    toast("Snapshot obtido");
+                } else {
+                    placeholder.setText("Câmera encontrada em " + finalIp + ",\nmas snapshot HTTP não respondeu.\nFirmware pode exigir RTSP ou login.");
+                }
+            });
+        });
+    }
+
+    private Bitmap downloadJpeg(String url) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(2500);
+            c.setReadTimeout(3500);
+            c.setRequestProperty("User-Agent", "VigiaEscolar/1.0");
+            int code = c.getResponseCode();
+            if (code != 200) return null;
+            InputStream is = c.getInputStream();
+            Bitmap b = BitmapFactory.decodeStream(is);
+            try { is.close(); } catch (Exception ignored) {}
+            return b;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /** Varre subnet local procurando câmera XM (porta DVRIP 34567 aberta). */
+    private String findCameraIpOnLan(String sn, String mac) {
+        java.util.List<String> ips = localSubnetIps();
+        java.util.concurrent.atomic.AtomicReference<String> found = new java.util.concurrent.atomic.AtomicReference<>(null);
+        java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+        for (String ip : ips) {
+            futures.add(pool.submit(() -> {
+                if (found.get() != null) return;
+                if (isOpen(ip, 34567, 350)) {
+                    // Porta DVRIP aberta = provavelmente câmera XM
+                    found.compareAndSet(null, ip);
+                }
+            }));
+        }
+        for (java.util.concurrent.Future<?> f : futures) {
+            try { f.get(4, java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ignored) {}
+            if (found.get() != null) break;
+        }
+        return found.get();
     }
 
     // ── Inicializa widgets do fluxo legado (escondidos) ───────────────────────
@@ -1646,6 +2079,8 @@ public class MainActivity extends Activity {
                 logBle("✓ Câmera aceitou Wi-Fi! Aguarde conectar (LED fixo).");
                 setChip(statusBle, "Wi-Fi configurado ✓", COLOR_GREEN);
                 if (configStatusLabel != null) configStatusLabel.setText("Wi-Fi enviado com sucesso!");
+                // Salva câmera localmente para aparecer em "Minhas câmeras"
+                saveConfiguredCamera();
                 mainHandler.postDelayed(this::disconnectBle, 1500);
                 // Avança para tela de sucesso após 2s (deixa logs visíveis um instante)
                 mainHandler.postDelayed(() -> showStep(WIZ_SUCCESS), 2000);
