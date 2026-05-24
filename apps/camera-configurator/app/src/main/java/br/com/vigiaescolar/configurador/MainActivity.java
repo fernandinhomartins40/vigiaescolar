@@ -1709,21 +1709,71 @@ public class MainActivity extends Activity {
     @SuppressLint("MissingPermission")
     private void startBleScan() {
         stopReconnect();  // novo scan manual cancela reconnect em andamento
+
+        // Re-inicializa BLE se necessário (ex.: usuário ligou o Bluetooth agora)
+        if (bleAdapter == null || !bleAdapter.isEnabled()) {
+            initBle();
+        }
+        if (bleAdapter == null) {
+            setChip(statusBle, "Bluetooth indisponível", Color.rgb(185, 28, 28));
+            logBle("✗ Bluetooth não disponível neste dispositivo");
+            toast("Este dispositivo não tem Bluetooth");
+            return;
+        }
+        if (!bleAdapter.isEnabled()) {
+            setChip(statusBle, "Bluetooth desligado", Color.rgb(185, 28, 28));
+            logBle("✗ Bluetooth está desligado — ative nas configurações");
+            toast("Ative o Bluetooth no celular");
+            return;
+        }
+
+        // Verifica permissões em runtime ANTES de tentar escanear
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED)
+                missing.add(Manifest.permission.BLUETOOTH_SCAN);
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                missing.add(Manifest.permission.BLUETOOTH_CONNECT);
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
+            missing.add(Manifest.permission.ACCESS_FINE_LOCATION);
+
+        if (!missing.isEmpty()) {
+            logBle("⚠ Permissões necessárias faltando: " + missing);
+            setChip(statusBle, "Conceda permissões e tente novamente", Color.rgb(185, 28, 28));
+            toast("Conceda as permissões pedidas e toque em \"Procurar\" novamente");
+            requestPermissions(missing.toArray(new String[0]), 70);
+            return;
+        }
+
+        // Garante que o scanner novo está disponível como fallback
+        if (bleScanner == null) bleScanner = bleAdapter.getBluetoothLeScanner();
+
         foundDevices.clear();
         scannedDevices.clear();
-        bleDeviceList.removeAllViews();
+        if (bleDeviceList != null) bleDeviceList.removeAllViews();
         bleScanning = true;
-        bleScanButton.setText("Parar busca BLE");
+        if (bleScanButton != null) bleScanButton.setText("Parar busca BLE");
         setChip(statusBle, "Escaneando... (60s)", COLOR_BLUE_MED);
         logBle("Buscando câmeras XM/iCSee... Coloque a câmera em modo de emparelhamento (LED piscando).");
 
         // Usa API legada startLeScan — exatamente como o app iCSee original
         // Isso produz BluetoothDevice com tipo correto, ao contrário de BluetoothLeScanner
-        boolean started = bleAdapter.startLeScan(legacyScanCallback);
+        boolean started = false;
+        try { started = bleAdapter.startLeScan(legacyScanCallback); }
+        catch (SecurityException se) { logBle("✗ SecurityException no startLeScan: " + se.getMessage()); }
+        catch (Exception e)          { logBle("✗ Erro no startLeScan: " + e.getMessage()); }
         logBle("startLeScan (API legada): " + (started ? "OK" : "falhou — tentando API nova"));
         if (!started && bleScanner != null) {
-            bleScanner.startScan(newScanCallback);
-            logBle("BluetoothLeScanner (API nova) iniciado como fallback");
+            try {
+                bleScanner.startScan(newScanCallback);
+                logBle("BluetoothLeScanner (API nova) iniciado como fallback");
+            } catch (Exception e) {
+                logBle("✗ BluetoothLeScanner também falhou: " + e.getMessage());
+                setChip(statusBle, "Erro ao iniciar busca", Color.rgb(185, 28, 28));
+                bleScanning = false;
+                return;
+            }
         }
 
         mainHandler.postDelayed(this::stopBleScan, 60_000);
@@ -3070,6 +3120,30 @@ public class MainActivity extends Activity {
         List<String> missing = new ArrayList<>();
         for (String p : need) if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) missing.add(p);
         if (!missing.isEmpty()) requestPermissions(missing.toArray(new String[0]), 70);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != 70) return;
+        boolean bleOk = true;
+        for (int i = 0; i < permissions.length; i++) {
+            String p = permissions[i];
+            boolean granted = i < grantResults.length && grantResults[i] == PackageManager.PERMISSION_GRANTED;
+            if (!granted && (p.equals(Manifest.permission.BLUETOOTH_SCAN)
+                    || p.equals(Manifest.permission.BLUETOOTH_CONNECT)
+                    || p.equals(Manifest.permission.ACCESS_FINE_LOCATION))) {
+                bleOk = false;
+            }
+        }
+        // Se o usuário está na tela de busca e concedeu agora, dispara o scan
+        if (bleOk && currentStep == WIZ_FIND_CAMERA && !bleScanning) {
+            logBle("✓ Permissões concedidas — iniciando busca");
+            startBleScan();
+        } else if (!bleOk && currentStep == WIZ_FIND_CAMERA) {
+            setChip(statusBle, "Permissões negadas", Color.rgb(185, 28, 28));
+            logBle("⚠ Algumas permissões foram negadas. Abra as configurações do app para conceder.");
+        }
     }
 
     // ─── UI helpers ──────────────────────────────────────────────────────────
