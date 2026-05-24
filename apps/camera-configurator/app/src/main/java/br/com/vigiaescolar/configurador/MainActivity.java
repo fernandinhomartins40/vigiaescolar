@@ -3037,8 +3037,10 @@ public class MainActivity extends Activity {
         report.append("\n");
 
         try (Socket s = new Socket()) {
+            report.append("[0] Abrindo socket TCP em ").append(ip).append(":").append(DVRIP_PORT).append("...\n");
             s.connect(new InetSocketAddress(ip, DVRIP_PORT), 4000);
             s.setSoTimeout(8000);
+            report.append("    Socket conectado. Local: ").append(s.getLocalSocketAddress()).append("\n");
             InputStream in = s.getInputStream();
             OutputStream out = s.getOutputStream();
 
@@ -3049,11 +3051,24 @@ public class MainActivity extends Activity {
             login.put("PassWord", dvripMd5(pass));
             login.put("UserName", user);
             login.put("SessionID", "0x0000000000");
-            dvripSend(out, 0, seqNo.getAndIncrement(), MSG_LOGIN, login.toString().getBytes(StandardCharsets.UTF_8));
+            byte[] loginBytes = login.toString().getBytes(StandardCharsets.UTF_8);
+            report.append("[1] LOGIN — enviando ").append(loginBytes.length).append(" bytes\n");
+            report.append("    Payload: ").append(login.toString()).append("\n");
+            dvripSend(out, 0, seqNo.getAndIncrement(), MSG_LOGIN, loginBytes);
+            report.append("    Enviado. Aguardando resposta (timeout 8s)...\n");
 
-            JSONObject loginRsp = dvripRead(in);
+            JSONObject loginRsp;
+            try {
+                loginRsp = dvripRead(in);
+            } catch (Exception readEx) {
+                report.append("    ✗ Erro ao ler resposta DVRIP: ")
+                      .append(readEx.getClass().getSimpleName())
+                      .append(": ").append(String.valueOf(readEx.getMessage())).append("\n");
+                report.append("    Stack: ").append(stackTraceShort(readEx)).append("\n");
+                return report.toString();
+            }
+            report.append("    Resposta bruta: ").append(loginRsp.toString()).append("\n");
             int ret = loginRsp.optInt("Ret", -1);
-            report.append("[1] LOGIN\n");
             report.append("    Ret: ").append(ret).append("\n");
             if (ret != DVRIP_OK && ret != 101) {
                 report.append("    ✗ Login falhou — diagnóstico interrompido\n");
@@ -3063,7 +3078,6 @@ public class MainActivity extends Activity {
             String sid = loginRsp.optString("SessionID", "0x0");
             int sessionInt = parseHex(sid);
             report.append("    SessionID: ").append(sid).append("\n");
-            report.append("    Resposta completa: ").append(loginRsp.toString()).append("\n");
             report.append("\n");
 
             // 2. SystemInfo
@@ -3116,26 +3130,40 @@ public class MainActivity extends Activity {
             dvripQueryAndAppend(report, in, out, sessionInt, 1042, "fVideo.OSDInfo");
 
         } catch (Exception e) {
-            report.append("\n✗ Erro de conexão DVRIP: ").append(e.getMessage()).append("\n");
+            report.append("\n✗ Erro de conexão DVRIP: ")
+                  .append(e.getClass().getSimpleName())
+                  .append(": ").append(String.valueOf(e.getMessage())).append("\n");
+            report.append("Stack: ").append(stackTraceShort(e)).append("\n");
         }
         report.append("=== FIM DIAGNÓSTICO ===\n");
         return report.toString();
     }
 
+    /** Devolve as 3 primeiras linhas do stack trace de uma exceção. */
+    private String stackTraceShort(Throwable t) {
+        StackTraceElement[] st = t.getStackTrace();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(st.length, 3); i++) {
+            sb.append("\n      at ").append(st[i].toString());
+        }
+        return sb.toString();
+    }
+
     /** Helper: faz GetConfig de um Name específico via msgId 1042 e anexa ao relatório. */
     private void dvripQueryAndAppend(StringBuilder report, InputStream in, OutputStream out,
                                      int sessionInt, int msgId, String name) {
+        report.append("[Q] ").append(name).append(" (msg ").append(msgId).append(")\n");
         try {
             JSONObject req = new JSONObject();
             req.put("Name", name);
             req.put("SessionID", String.format("0x%08X", sessionInt));
             dvripSend(out, sessionInt, seqNo.getAndIncrement(), msgId, req.toString().getBytes(StandardCharsets.UTF_8));
             JSONObject rsp = dvripRead(in);
-            report.append("[Q] ").append(name).append(" (msg ").append(msgId).append(")\n");
             report.append("    Ret: ").append(rsp.optInt("Ret", -1)).append("\n");
             report.append("    Resposta: ").append(rsp.toString()).append("\n\n");
         } catch (Exception e) {
-            report.append("[Q] ").append(name).append(": ERRO ").append(e.getMessage()).append("\n\n");
+            report.append("    ERRO ").append(e.getClass().getSimpleName())
+                  .append(": ").append(String.valueOf(e.getMessage())).append("\n\n");
         }
     }
 
