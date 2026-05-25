@@ -208,9 +208,19 @@ router.post(
       res.status(401).json({ error: "Token de gateway inválido" });
       return;
     }
+    const body = z
+      .object({
+        appVersion: z.string().trim().min(1).max(64).optional(),
+      })
+      .passthrough()
+      .parse(req.body ?? {});
     await prisma.gateway.update({
       where: { id: ctx.gatewayId },
-      data: { lastSeenAt: new Date(), status: GatewayStatus.ACTIVE },
+      data: {
+        lastSeenAt: new Date(),
+        status: GatewayStatus.ACTIVE,
+        ...(body.appVersion ? { appVersion: body.appVersion } : {}),
+      },
     });
     res.json({ ok: true });
   }),

@@ -12,6 +12,7 @@
  *     em todas as chamadas pra API.
  */
 import os from "node:os";
+import { app } from "electron";
 import { config, saveConfig } from "./config";
 
 export type PairResult = {
@@ -32,7 +33,7 @@ export async function pairWithServer(code: string): Promise<PairResult> {
     hostname: os.hostname(),
     platform: process.platform,
     arch: process.arch,
-    version: process.env.npm_package_version ?? "0.1.0",
+    version: app.getVersion(),
   };
 
   const response = await fetch(`${apiBase}/gateways/pair`, {

@@ -146,7 +146,16 @@ async function launchRelay() {
 
 async function sendHeartbeat() {
   try {
-    await apiRequest("/gateways/heartbeat", { method: "POST" });
+    await apiRequest("/gateways/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({
+        appVersion: app.getVersion(),
+        streamRelay: {
+          configuredCameras: relayCameras().length,
+          running: !!relay,
+        },
+      }),
+    });
   } catch (error) {
     console.warn("[heartbeat] falhou:", (error as Error).message);
   }
