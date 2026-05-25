@@ -6,6 +6,12 @@ contextBridge.exposeInMainWorld("gateway", {
   pair: (code: string): Promise<PairResponse> => ipcRenderer.invoke("pair", code),
   unpair: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("unpair"),
   discoverNow: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("discover-now"),
+  checkForUpdates: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:check"),
+  onStatusChanged: (callback: () => void): (() => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("status:changed", listener);
+    return () => ipcRenderer.removeListener("status:changed", listener);
+  },
 });
 
 declare global {
@@ -15,6 +21,8 @@ declare global {
       pair: (code: string) => Promise<PairResponse>;
       unpair: () => Promise<{ ok: boolean }>;
       discoverNow: () => Promise<{ ok: boolean }>;
+      checkForUpdates: () => Promise<{ ok: boolean }>;
+      onStatusChanged: (callback: () => void) => () => void;
     };
   }
 }

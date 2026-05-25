@@ -32,6 +32,20 @@ if [ ! -f "$APP_DIR/.env" ]; then
   echo "AVISO: .env criado — edite /opt/vigiaescolar/.env com os valores reais."
 fi
 
+# O relay desktop publica vídeo contínuo no MediaMTX com esta credencial.
+# Preserva tokens existentes; gera apenas para instalações antigas/placeholder.
+if ! grep -Eq '^CAMERA_PUBLISH_TOKEN=.+$' "$APP_DIR/.env" \
+  || grep -Eq '^CAMERA_PUBLISH_TOKEN=change-this-' "$APP_DIR/.env"; then
+  CAMERA_PUBLISH_TOKEN="$(openssl rand -hex 24)"
+  if grep -q '^CAMERA_PUBLISH_TOKEN=' "$APP_DIR/.env"; then
+    sed -i "s|^CAMERA_PUBLISH_TOKEN=.*|CAMERA_PUBLISH_TOKEN=$CAMERA_PUBLISH_TOKEN|" "$APP_DIR/.env"
+  else
+    printf '\n# Token de publicacao do streaming ao vivo (gerado no deploy)\nCAMERA_PUBLISH_TOKEN=%s\n' \
+      "$CAMERA_PUBLISH_TOKEN" >> "$APP_DIR/.env"
+  fi
+  echo "  CAMERA_PUBLISH_TOKEN gerado para o streaming ao vivo."
+fi
+
 # ─── 3. Nginx: config HTTP (apenas se ainda não existe config com SSL) ─────────
 echo "==> [3/7] Configurando nginx..."
 

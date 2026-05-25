@@ -272,6 +272,9 @@ export function toCameraDTO(camera: CameraRecord): CameraDTO {
     bluetoothMac: (camera as { bluetoothMac?: string | null }).bluetoothMac ?? undefined,
     serialNumber: (camera as { serialNumber?: string | null }).serialNumber ?? undefined,
     wifiSsid: (camera as { wifiSsid?: string | null }).wifiSsid ?? undefined,
+    liveUrl: (camera as { serialNumber?: string | null }).serialNumber
+      ? `/api/cameras/${encodeURIComponent(camera.id)}/live/index.m3u8`
+      : undefined,
     operacional: {
       status: (camera.runtimeStatus?.healthStatus as CameraDTO["operacional"]["status"]) ?? "UNKNOWN",
       gatewayId: camera.runtimeStatus?.gatewayId ?? undefined,

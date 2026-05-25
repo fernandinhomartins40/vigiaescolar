@@ -16,6 +16,8 @@ coverage
 tools/android-build/
 apps/api/dist
 apps/api/uploads
+apps/camera-gateway-desktop/release/
+apps/camera-gateway-desktop/vendor/
 *.local
 
 # Temporary folders

@@ -15,7 +15,41 @@ function safeSegment(value: string) {
   return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "_") || "unknown";
 }
 
-function withCredentials(camera: GatewayCamera) {
+/**
+ * Resolve a URL final do stream que o FFmpeg vai abrir.
+ *
+ * Modo MediaMTX (config.mediaServer preenchida):
+ *   Ignora a streamUrl gravada no banco (que aponta para IP local da câmera,
+ *   inalcançável pela VPS). Em vez disso, usa o SerialNumber da câmera como
+ *   stream key, lendo da republicação RTSP do MediaMTX:
+ *     rtsp://gateway:password@mediamtx:8554/live/<serialNumber>
+ *   O gateway desktop na escola publica continuamente para o MediaMTX; assim
+ *   a VPS não precisa abrir conexão para a rede local da câmera.
+ *
+ * Modo direto (config.mediaServer vazio):
+ *   Usa streamUrl + credenciais do banco (modo legado, gateway na mesma LAN).
+ */
+function resolveStreamUrl(camera: GatewayCamera) {
+  if (config.mediaServer && camera.serialNumber) {
+    const base = config.mediaServer.replace(/\/$/, "");
+    const safeKey = camera.serialNumber.replace(/[^A-Za-z0-9_-]/g, "");
+    if (!safeKey) return withDirectCredentials(camera);
+    if (config.mediaServerUser && config.mediaServerPass) {
+      try {
+        const url = new URL(`${base}/live/${safeKey}`);
+        url.username = config.mediaServerUser;
+        url.password = config.mediaServerPass;
+        return url.toString();
+      } catch {
+        // se base não for URL válida cai para direto
+      }
+    }
+    return `${base}/live/${safeKey}`;
+  }
+  return withDirectCredentials(camera);
+}
+
+function withDirectCredentials(camera: GatewayCamera) {
   const streamUrl = camera.streamUrl
     .replaceAll("{username}", encodeURIComponent(camera.username ?? ""))
     .replaceAll("{password}", encodeURIComponent(camera.password ?? ""));
@@ -100,7 +134,7 @@ function buildUsbArgs(camera: GatewayCamera, filePath: string): string[] {
 }
 
 function buildNetworkArgs(camera: GatewayCamera, filePath: string): string[] {
-  const streamUrl = withCredentials(camera);
+  const streamUrl = resolveStreamUrl(camera);
   // FFmpeg 8+ removeu `-stimeout`. O RTSP demuxer expõe `-timeout` em
   // microssegundos. Mantém o mesmo valor (snapshotTimeoutMs * 1000).
   // Verificado em produção via `ffmpeg -h demuxer=rtsp` (vps-gateway-01,

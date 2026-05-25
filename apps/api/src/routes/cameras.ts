@@ -227,6 +227,55 @@ router.get(
 );
 
 router.get(
+  "/:id/live/*asset",
+  asyncHandler(async (req, res) => {
+    const cameraId = singleParam(req.params.id);
+    if (!cameraId) {
+      throw notFound("Camera nao encontrada");
+    }
+
+    const camera = await loadCamera(req.auth!.tenantId, cameraId);
+    const streamKey = camera.serialNumber?.replace(/[^A-Za-z0-9_-]/g, "");
+    const mediaBaseUrl = process.env.MEDIA_INTERNAL_HLS_URL?.trim() || "http://mediamtx:8888";
+    const mediaToken = process.env.CAMERA_PUBLISH_TOKEN?.trim() || "";
+    if (!streamKey || !mediaToken) {
+      res.status(503).json({ error: "Streaming ao vivo nao configurado para esta camera." });
+      return;
+    }
+
+    const rawAsset = req.params.asset as unknown;
+    const asset = (Array.isArray(rawAsset) ? rawAsset.join("/") : String(rawAsset ?? ""))
+      .replace(/[^A-Za-z0-9_./-]/g, "");
+    if (!asset) {
+      res.status(400).json({ error: "Arquivo HLS invalido." });
+      return;
+    }
+
+    const upstreamUrl = `${mediaBaseUrl.replace(/\/$/, "")}/live/${encodeURIComponent(streamKey)}/${asset}`;
+    const authorization = Buffer.from(`gateway:${mediaToken}`).toString("base64");
+    const upstream = await fetch(upstreamUrl, {
+      headers: { Authorization: `Basic ${authorization}` },
+    });
+
+    const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
+    const payload = Buffer.from(await upstream.arrayBuffer());
+    res.status(upstream.status);
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", upstream.headers.get("cache-control") ?? "no-cache");
+
+    if (contentType.includes("mpegurl")) {
+      const playlist = payload
+        .toString("utf8")
+        .replaceAll(`/live/${streamKey}/`, `/api/cameras/${encodeURIComponent(camera.id)}/live/`);
+      res.send(playlist);
+      return;
+    }
+
+    res.send(payload);
+  }),
+);
+
+router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const cameraId = singleParam(req.params.id);

@@ -26,6 +26,18 @@ export const config = {
   // Dispositivo USB explícito (ex: /dev/video0, "Integrated Camera").
   // Se vazio, o gateway usa o índice extraído da streamUrl da câmera.
   usbDevice: stringEnv("CAMERA_USB_DEVICE"),
+
+  // Modo MediaMTX: o gateway desktop da escola publica RTMPS para a VPS.
+  // Quando preenchido, o gateway IGNORA a streamUrl gravada no banco
+  // (que aponta para IP da câmera, inalcançável pela VPS) e usa
+  // `${mediaServer}/live/<SerialNumber>` para puxar o stream republicado
+  // pelo MediaMTX. Ex.: rtsp://mediamtx:8554
+  mediaServer: stringEnv("CAMERA_GATEWAY_MEDIA_SERVER"),
+  // Credenciais para autenticar como "read" no MediaMTX. Em deploy padrão
+  // ambos containers ficam na rede docker interna, mas se MediaMTX exigir
+  // auth, usamos estas. Senão fica vazio.
+  mediaServerUser: stringEnv("CAMERA_GATEWAY_MEDIA_USER", "gateway"),
+  mediaServerPass: stringEnv("CAMERA_GATEWAY_MEDIA_PASS"),
 };
 
 export function validateConfig() {

@@ -83,6 +83,7 @@ export type CameraDTO = {
   bluetoothMac?: string;
   serialNumber?: string;
   wifiSsid?: string;
+  liveUrl?: string;
   operacional: {
     status: "ONLINE" | "OFFLINE" | "DEGRADED" | "ERROR" | "UNKNOWN";
     gatewayId?: string;

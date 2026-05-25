@@ -2,22 +2,25 @@
   "name": "@vigiaescolar/camera-gateway-desktop",
   "version": "0.1.0",
   "private": true,
+  "author": "VigiaEscolar",
   "description": "Gateway desktop VigiaEscolar — roda no PC da escola e faz relay das câmeras locais para a VPS.",
   "main": "dist/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "package": "electron-vite build && electron-builder",
-    "package:msi": "electron-vite build && electron-builder --win --x64",
+    "installer": "node scripts/download-go2rtc.mjs && electron-vite build && electron-builder --win nsis --x64 && node scripts/create-download-alias.mjs",
+    "package": "npm run installer",
+    "package:msi": "npm run installer",
     "type-check": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.19.17",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
+    "electron": "33.4.11",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "extract-zip": "^2.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "@types/react": "^18.3.12",
@@ -27,8 +30,7 @@
   },
   "dependencies": {
     "electron-store": "^10.0.0",
-    "electron-updater": "^6.3.9",
-    "auto-launch": "^5.0.6"
+    "electron-updater": "^6.3.9"
   },
   "engines": {
     "node": ">=20.0.0"

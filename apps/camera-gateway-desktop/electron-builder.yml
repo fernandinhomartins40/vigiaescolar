@@ -8,11 +8,16 @@ directories:
 
 files:
   - dist/**/*
+  - build/icon.png
   - package.json
   - "!**/.vscode/*"
   - "!src/*"
   - "!electron.vite.config.ts"
   - "!tsconfig.json"
+
+extraResources:
+  - from: vendor/go2rtc/go2rtc.exe
+    to: tools/go2rtc.exe
 
 # Auto-update vai buscar updates em https://vigiaescolar.com.br/downloads/
 publish:
@@ -20,13 +25,12 @@ publish:
   url: https://vigiaescolar.com.br/downloads/gateway/
 
 win:
+  icon: build/icon.png
   target:
     - target: nsis
       arch: [x64]
   artifactName: VigiaEscolar-Gateway-Setup-${version}.${ext}
-  # Sem assinatura digital por enquanto — usuário verá aviso do SmartScreen
-  # (até a gente comprar um cert OV ou usar Cloudflare/Sectigo).
-  signAndEditExecutable: false
+  # Sem certificado configurado, o Windows exibira aviso do SmartScreen.
 
 nsis:
   oneClick: false
@@ -34,10 +38,10 @@ nsis:
   allowToChangeInstallationDirectory: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  installerIcon: build/icon.ico
-  uninstallerIcon: build/icon.ico
-  installerHeaderIcon: build/icon.ico
   shortcutName: VigiaEscolar Gateway
+  runAfterFinish: true
+  installerLanguages:
+    - pt_BR
 
 mac:
   target: dmg

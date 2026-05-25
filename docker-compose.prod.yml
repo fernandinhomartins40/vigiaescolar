@@ -47,6 +47,11 @@ services:
       FACE_PLATFORM_URL: http://face-server:9006/api/face-platform
       FACE_PLATFORM_SERVICE_TOKEN: ${FACE_PLATFORM_SERVICE_TOKEN}
       CAMERA_GATEWAY_SERVICE_TOKEN: ${CAMERA_GATEWAY_SERVICE_TOKEN}
+      CAMERA_PUBLISH_TOKEN: ${CAMERA_PUBLISH_TOKEN}
+      MEDIA_INGEST_SCHEME: ${MEDIA_INGEST_SCHEME:-rtmps}
+      MEDIA_INGEST_HOST: ${MEDIA_INGEST_HOST:-vigiaescolar.com.br}
+      MEDIA_INGEST_PORT: ${MEDIA_INGEST_PORT:-1936}
+      MEDIA_INTERNAL_HLS_URL: http://mediamtx:8888
     depends_on:
       db:
         condition: service_healthy
@@ -133,6 +138,34 @@ services:
     networks:
       - internal
 
+  # MediaMTX recebe vídeo contínuo publicado pelo gateway desktop instalado
+  # na escola. O PC lê DVRIP da câmera XM e publica RTMPS usando o SerialNumber.
+  mediamtx:
+    build:
+      context: .
+      dockerfile: docker/mediamtx.Dockerfile
+    restart: unless-stopped
+    environment:
+      CAMERA_GATEWAY_SERVICE_TOKEN: ${CAMERA_GATEWAY_SERVICE_TOKEN}
+      MTX_AUTHINTERNALUSERS_0_PASS: ${CAMERA_PUBLISH_TOKEN}
+      MTX_AUTHINTERNALUSERS_1_PASS: ${CAMERA_PUBLISH_TOKEN}
+    ports:
+      # Entrada pública TLS iniciada pelo PC da escola.
+      - "1936:1936"
+    expose:
+      - "8554"
+      - "8888"
+    volumes:
+      - ./docker/mediamtx.yml:/mediamtx.yml:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 1936 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   camera-gateway:
     build:
       context: ./apps/camera-gateway
@@ -145,12 +178,18 @@ services:
       CAMERA_GATEWAY_ID: vps-gateway-01
       CAMERA_GATEWAY_LOCAL: "false"
       CAMERA_GATEWAY_POLL_INTERVAL_MS: 30000
-      CAMERA_GATEWAY_FRAME_INTERVAL_MS: 5000
+      # Reconhecimento amostra continuamente o stream publicado, a cada 1s.
+      CAMERA_GATEWAY_FRAME_INTERVAL_MS: 1000
       CAMERA_GATEWAY_SNAPSHOT_DIR: /app/snapshots
       CAMERA_GATEWAY_MAX_CONCURRENT_CAPTURES: 4
       FFMPEG_PATH: ffmpeg
+      # Consome o stream publicado pelo gateway desktop no MediaMTX.
+      CAMERA_GATEWAY_MEDIA_SERVER: rtsp://mediamtx:8554
+      CAMERA_GATEWAY_MEDIA_USER: gateway
+      CAMERA_GATEWAY_MEDIA_PASS: ${CAMERA_PUBLISH_TOKEN}
     depends_on:
       - api
+      - mediamtx
     volumes:
       - camera_gateway_snapshots:/app/snapshots
     networks:

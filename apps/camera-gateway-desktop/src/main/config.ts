@@ -17,6 +17,10 @@ export type DiscoveredCamera = {
   hardware: string;
   mac: string;
   lastSeenAt: number;
+  cameraId?: string;
+  streamKey?: string;
+  liveUrl?: string;
+  publishUrl?: string;
 };
 
 export type GatewayConfig = {

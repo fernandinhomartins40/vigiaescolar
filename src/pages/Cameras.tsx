@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Hls from "hls.js";
 import {
   Activity,
   AlertTriangle,
@@ -404,6 +405,7 @@ function useLiveCamera(camera: Camera | undefined, references: LoadedRecognition
   const legacyCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const submissionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const lastAnalysisAtRef = useRef(0);
   const inFlightRef = useRef(false);
@@ -420,7 +422,13 @@ function useLiveCamera(camera: Camera | undefined, references: LoadedRecognition
     activeRef.current = false;
     const stream = streamRef.current; streamRef.current = null;
     if (stream) stream.getTracks().forEach((t) => t.stop());
-    if (videoRef.current) { videoRef.current.srcObject = null; }
+    hlsRef.current?.destroy();
+    hlsRef.current = null;
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+      videoRef.current.removeAttribute("src");
+      videoRef.current.load();
+    }
     inFlightRef.current = false; lastAnalysisAtRef.current = 0;
     clearOverlay(canvasRef.current);
     setAnalyzing(false); setFaces([]); setStatusMessage(""); setErrorMessage(null);
@@ -492,21 +500,53 @@ function useLiveCamera(camera: Camera | undefined, references: LoadedRecognition
 
   const start = useCallback(async () => {
     if (!camera) { setErrorMessage("Câmera não encontrada."); return; }
-    if (!navigator.mediaDevices?.getUserMedia) { setErrorMessage("Câmera não suportada neste dispositivo."); return; }
+    const isNetworkCamera = camera.tipo !== "USB" && camera.url !== "device://live";
+    if (!isNetworkCamera && !navigator.mediaDevices?.getUserMedia) { setErrorMessage("Câmera não suportada neste dispositivo."); return; }
     if (typeof window !== "undefined" && !window.isSecureContext && window.location.hostname !== "localhost") {
       setErrorMessage("A câmera só funciona em HTTPS ou localhost."); return;
     }
     setState("loading"); setErrorMessage(null);
     stopStream();
     try {
-      const [faceApiEngine, stream] = await Promise.all([
-        getFaceApiEngine(),
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "user" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }),
-      ]);
+      const faceApiEngine = await getFaceApiEngine();
       if (!faceApiEngine) { setErrorMessage("Motor face-api.js não pôde ser carregado."); setState("error"); return; }
       faceApiRef.current = faceApiEngine.faceapi;
-      streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => undefined); }
+
+      const video = videoRef.current;
+      if (!video) throw new Error("Elemento de vídeo indisponível.");
+
+      if (isNetworkCamera) {
+        const liveUrl = camera.liveUrl ?? camera.url;
+        if (!liveUrl.includes(".m3u8")) {
+          throw new Error("Esta câmera ainda não possui stream ao vivo publicado pelo gateway.");
+        }
+
+        if (Hls.isSupported()) {
+          const hls = new Hls({ lowLatencyMode: true, backBufferLength: 15 });
+          hlsRef.current = hls;
+          await new Promise<void>((resolve, reject) => {
+            hls.once(Hls.Events.MANIFEST_PARSED, () => resolve());
+            hls.on(Hls.Events.ERROR, (_event, data) => {
+              if (data.fatal) reject(new Error(`Falha HLS: ${data.details}`));
+            });
+            hls.loadSource(liveUrl);
+            hls.attachMedia(video);
+          });
+        } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+          video.src = liveUrl;
+        } else {
+          throw new Error("Navegador sem suporte a vídeo HLS.");
+        }
+      } else {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "user" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
+        streamRef.current = stream;
+        video.srcObject = stream;
+      }
+
+      await video.play().catch(() => undefined);
       activeRef.current = true;
       setState("active");
       const refCount = refsRef.current.length;
@@ -514,7 +554,7 @@ function useLiveCamera(camera: Camera | undefined, references: LoadedRecognition
       startLoop(); void runFrame();
     } catch (e) {
       console.error("Erro ao iniciar câmera:", e);
-      setErrorMessage("Não foi possível iniciar a câmera. Verifique a permissão no navegador.");
+      setErrorMessage(e instanceof Error ? e.message : "Não foi possível iniciar o vídeo ao vivo.");
       setState("error");
       stopStream();
     }
@@ -611,7 +651,7 @@ function CameraDrawer({ open, onClose, editCamera, queryClient, keys, schools }:
     setForm({ ...emptyCameraForm, escolaId: form.escolaId, tipo, nome: tipo === "USB" ? "Câmera do dispositivo" : "", porta: tipo === "RTSP" ? 554 : tipo === "IP" ? 80 : 554, perfilRede: tipo === "RTSP" ? "xm-h264dvr" : "manual", canal: 1, stream: "main" });
   };
 
-  const useDiscovered = (camera: CameraDiscoveryCandidate) => {
+  const selectDiscoveredCamera = (camera: CameraDiscoveryCandidate) => {
     const rtspPort = camera.ports.includes(554) ? 554 : camera.ports.includes(8554) ? 8554 : 554;
     const profile: NetworkProfile = camera.profile === "xm-h264dvr" ? "xm-h264dvr" : "manual";
     setForm({ ...form, tipo: camera.profile === "ip" ? "IP" : "RTSP", perfilRede: profile, url: camera.ip, porta: rtspPort, canal: 1, stream: "main", usuario: form.usuario || (profile === "xm-h264dvr" ? "yura" : ""), localizacao: form.localizacao || "Câmera encontrada na rede" });
@@ -693,7 +733,7 @@ function CameraDrawer({ open, onClose, editCamera, queryClient, keys, schools }:
               {discoveredCameras.length > 0 && (
                 <div className="grid grid-cols-2 gap-2">
                   {discoveredCameras.map((cam) => (
-                    <button key={cam.ip} type="button" onClick={() => useDiscovered(cam)}
+                    <button key={cam.ip} type="button" onClick={() => selectDiscoveredCamera(cam)}
                       className="rounded border border-primary/20 bg-background p-2 text-left hover:border-primary/60 transition-colors">
                       <div className="text-sm font-medium">{cam.ip}</div>
                       <div className="text-[11px] text-muted-foreground">{cam.label} · {cam.ports.join(", ")}</div>
@@ -1104,7 +1144,6 @@ function MonitorTab() {
         </div>
         {totalDetections > 0 && (
           <div className="mt-3 h-2 rounded-full bg-muted overflow-hidden">
-            {/* eslint-disable-next-line react/forbid-component-props */}
             <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.round((matchedDetections / totalDetections) * 100)}%` }} />
           </div>
         )}
@@ -1249,6 +1288,7 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
 
   const isActive = live.state === "active";
   const isLoading = live.state === "loading";
+  const mirrorVideo = camera?.tipo === "USB" || camera?.url === "device://live";
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
@@ -1277,8 +1317,8 @@ function LiveTab({ mode }: { mode: CamerasMode }) {
         </div>
 
         <div className="relative aspect-video bg-black rounded-lg overflow-hidden border border-border">
-          <video ref={live.videoRef} autoPlay muted playsInline className={cn("absolute inset-0 z-10 h-full w-full object-cover scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
-          <canvas ref={live.canvasRef} className={cn("absolute inset-0 z-20 h-full w-full pointer-events-none scale-x-[-1] transition-opacity duration-300", isActive ? "opacity-100" : "opacity-0")} />
+          <video ref={live.videoRef} autoPlay muted playsInline className={cn("absolute inset-0 z-10 h-full w-full object-cover transition-opacity duration-300", mirrorVideo && "scale-x-[-1]", isActive ? "opacity-100" : "opacity-0")} />
+          <canvas ref={live.canvasRef} className={cn("absolute inset-0 z-20 h-full w-full pointer-events-none transition-opacity duration-300", mirrorVideo && "scale-x-[-1]", isActive ? "opacity-100" : "opacity-0")} />
           <canvas ref={live.legacyCanvasRef} className="hidden" aria-hidden="true" />
           <canvas ref={live.submissionCanvasRef} className="hidden" aria-hidden="true" />
 
@@ -1453,7 +1493,7 @@ export function CamerasView({ mode = "test" }: { mode?: CamerasMode }) {
       <div className="flex gap-1 mb-4 border-b border-border">
         {([
           { value: "monitor", label: "Monitoramento & Saúde" },
-          { value: "live", label: "Câmera ao Vivo (teste)" },
+          { value: "live", label: "Vídeo ao Vivo" },
         ] as { value: ViewTab; label: string }[]).map(({ value, label }) => (
           <button
             key={value}

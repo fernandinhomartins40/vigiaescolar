@@ -6,18 +6,17 @@
  *  2. Abrir janela de configuração (pareamento + status)
  *  3. Rodar workers em background:
  *     - LAN scanner (DVRIP) para achar câmeras XM na rede
- *     - Captura periódica de snapshot por câmera
- *     - Upload de frames para a API VigiaEscolar
+ *     - Relay continuo DVRIP -> RTMPS/MediaMTX por camera
  *  4. Auto-start no boot do Windows
  *  5. Auto-update via electron-updater
  */
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage } from "electron";
+import { app, BrowserWindow, Tray, Menu, Notification, ipcMain, nativeImage } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import AutoLaunch from "auto-launch";
+import { autoUpdater } from "electron-updater";
 import { config, saveConfig } from "./config";
 import { runDiscoveryLoop, stopDiscovery } from "./lanDiscovery";
-import { runCaptureLoop, stopCapture } from "./captureLoop";
+import { runStreamRelay, stopStreamRelay } from "./streamRelay";
 import { pairWithServer } from "./pairing";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -25,6 +24,26 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let updateTimer: NodeJS.Timeout | null = null;
+const startHidden = process.argv.includes("--hidden");
+const appIconPath = join(__dirname, "..", "..", "build", "icon.png");
+
+type UpdateStatus = {
+  state: "idle" | "checking" | "available" | "ready" | "error";
+  message: string;
+  version?: string;
+};
+
+let updateStatus: UpdateStatus = {
+  state: "idle",
+  message: "Aplicativo atualizado",
+};
+
+function setUpdateStatus(status: UpdateStatus) {
+  updateStatus = status;
+  mainWindow?.webContents.send("status:changed");
+  rebuildTrayMenu();
+}
 
 // ─── Janela principal ───────────────────────────────────────────────────────
 function createWindow() {
@@ -34,7 +53,8 @@ function createWindow() {
     minWidth: 640,
     minHeight: 480,
     title: "VigiaEscolar Gateway",
-    icon: join(__dirname, "..", "..", "build", "icon.png"),
+    icon: appIconPath,
+    show: !startHidden,
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, "..", "preload", "index.js"),
@@ -67,9 +87,7 @@ function createWindow() {
 
 // ─── Tray icon ──────────────────────────────────────────────────────────────
 function createTray() {
-  const iconPath = join(__dirname, "..", "..", "build", "tray-icon.png");
-  // Em dev/sem ícone real, usa placeholder transparente
-  const trayIcon = nativeImage.createFromPath(iconPath);
+  const trayIcon = nativeImage.createFromPath(appIconPath);
   tray = new Tray(trayIcon.isEmpty() ? nativeImage.createEmpty() : trayIcon);
   tray.setToolTip("VigiaEscolar Gateway");
 
@@ -98,6 +116,10 @@ function rebuildTrayMenu() {
       label: paired ? `Câmeras detectadas: ${camerasCount}` : "Aguardando pareamento",
       enabled: false,
     },
+    {
+      label: updateStatus.message,
+      enabled: false,
+    },
     { type: "separator" },
     {
       label: "Abrir painel",
@@ -112,6 +134,16 @@ function rebuildTrayMenu() {
       label: "Procurar câmeras agora",
       enabled: paired,
       click: () => runDiscoveryLoop({ immediate: true }),
+    },
+    {
+      label: updateStatus.state === "ready" ? "Reiniciar e atualizar" : "Verificar atualização",
+      click: () => {
+        if (updateStatus.state === "ready") {
+          autoUpdater.quitAndInstall();
+        } else {
+          checkForUpdates();
+        }
+      },
     },
     { type: "separator" },
     {
@@ -131,12 +163,14 @@ ipcMain.handle("config:get", () => {
   const c = config.store;
   return {
     paired: !!c.gatewayToken,
+    appVersion: app.getVersion(),
     gatewayId: c.gatewayId,
     gatewayName: c.gatewayName,
     schoolName: c.schoolName,
     apiBaseUrl: c.apiBaseUrl,
     lastDiscoveredCameras: c.lastDiscoveredCameras ?? [],
     lastSyncAt: c.lastSyncAt,
+    update: updateStatus,
   };
 });
 
@@ -146,7 +180,7 @@ ipcMain.handle("pair", async (_evt, code: string) => {
     rebuildTrayMenu();
     // Inicia descoberta imediatamente após pareamento
     runDiscoveryLoop({ immediate: true });
-    runCaptureLoop();
+    runStreamRelay();
     return { ok: true, ...result };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? "Erro desconhecido" };
@@ -155,7 +189,7 @@ ipcMain.handle("pair", async (_evt, code: string) => {
 
 ipcMain.handle("unpair", () => {
   stopDiscovery();
-  stopCapture();
+  stopStreamRelay();
   saveConfig({
     gatewayToken: undefined,
     gatewayId: undefined,
@@ -172,19 +206,76 @@ ipcMain.handle("discover-now", () => {
   return { ok: true };
 });
 
-// ─── Auto-launch (Windows: chave em HKCU\Run) ───────────────────────────────
-const autoLauncher = new AutoLaunch({
-  name: "VigiaEscolar Gateway",
-  isHidden: true, // inicia minimizado para tray
+ipcMain.handle("updates:check", async () => {
+  await checkForUpdates();
+  return { ok: true };
 });
 
-async function ensureAutoLaunch() {
+// ─── Auto-launch + atualização ──────────────────────────────────────────────
+function ensureAutoLaunch() {
+  if (!app.isPackaged || process.platform !== "win32") return;
   try {
-    const enabled = await autoLauncher.isEnabled();
-    if (!enabled) await autoLauncher.enable();
+    app.setLoginItemSettings({
+      openAtLogin: true,
+      path: process.execPath,
+      args: ["--hidden"],
+    });
   } catch (e) {
-    console.warn("[auto-launch] falha (provavelmente roda em dev):", e);
+    console.warn("[auto-launch] falha:", e);
   }
+}
+
+async function checkForUpdates() {
+  if (!app.isPackaged || process.platform !== "win32") {
+    setUpdateStatus({ state: "idle", message: "Atualizações disponíveis no instalador" });
+    return;
+  }
+
+  setUpdateStatus({ state: "checking", message: "Verificando atualização..." });
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (error) {
+    setUpdateStatus({ state: "error", message: "Falha ao consultar atualizações" });
+    console.warn("[update] falha ao consultar:", error);
+  }
+}
+
+function configureAutoUpdate() {
+  if (!app.isPackaged || process.platform !== "win32") return;
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on("update-not-available", () => {
+    setUpdateStatus({ state: "idle", message: "Aplicativo atualizado" });
+  });
+  autoUpdater.on("update-available", (info) => {
+    setUpdateStatus({
+      state: "available",
+      message: `Baixando atualização v${info.version}...`,
+      version: info.version,
+    });
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    setUpdateStatus({
+      state: "ready",
+      message: `Atualização v${info.version} pronta`,
+      version: info.version,
+    });
+    if (Notification.isSupported()) {
+      new Notification({
+        title: "VigiaEscolar Gateway",
+        body: "Atualização pronta. Reinicie pelo ícone perto do relógio para aplicar.",
+        icon: appIconPath,
+      }).show();
+    }
+  });
+  autoUpdater.on("error", (error) => {
+    setUpdateStatus({ state: "error", message: "Falha ao baixar atualização" });
+    console.warn("[update] erro:", error);
+  });
+
+  checkForUpdates();
+  updateTimer = setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
 }
 
 // ─── Single instance ────────────────────────────────────────────────────────
@@ -201,25 +292,23 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    app.setAppUserModelId("br.com.vigiaescolar.gateway");
     createTray();
     createWindow();
-    await ensureAutoLaunch();
+    ensureAutoLaunch();
+    configureAutoUpdate();
 
     // Se já está pareado, começa a trabalhar imediatamente
     if (config.get("gatewayToken")) {
       runDiscoveryLoop({ immediate: true });
-      runCaptureLoop();
+      runStreamRelay();
     }
-  });
-
-  app.on("window-all-closed", (e: any) => {
-    // Não sai no Windows/Linux quando todas as janelas fecham — fica no tray
-    e?.preventDefault?.();
   });
 
   app.on("before-quit", () => {
     isQuitting = true;
     stopDiscovery();
-    stopCapture();
+    stopStreamRelay();
+    if (updateTimer) clearInterval(updateTimer);
   });
 }

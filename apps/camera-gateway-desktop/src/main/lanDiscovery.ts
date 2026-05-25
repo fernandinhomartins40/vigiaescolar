@@ -13,6 +13,7 @@ import { createConnection } from "node:net";
 import { config, saveConfig, type DiscoveredCamera } from "./config";
 import { dvripGetSystemInfo } from "./dvrip";
 import { apiRequest } from "./pairing";
+import { syncStreamRelays } from "./streamRelay";
 
 const DVRIP_PORT = 34567;
 const TCP_TIMEOUT_MS = 500;
@@ -114,20 +115,30 @@ async function runScanOnce(): Promise<DiscoveredCamera[]> {
       if (cam && cam.serialNumber) cameras.push(cam);
     }
 
-    saveConfig({ lastDiscoveredCameras: cameras, lastSyncAt: Date.now() });
-    await uploadToServer(cameras).catch((e) =>
-      console.warn(`[discovery] upload p/ API falhou:`, e.message),
-    );
+    const registered = await uploadToServer(cameras).catch((e) => {
+      console.warn(`[discovery] upload p/ API falhou:`, e.message);
+      return cameras;
+    });
+    saveConfig({ lastDiscoveredCameras: registered, lastSyncAt: Date.now() });
+    syncStreamRelays();
 
-    return cameras;
+    return registered;
   } finally {
     scanning = false;
   }
 }
 
-async function uploadToServer(cameras: DiscoveredCamera[]) {
-  if (cameras.length === 0) return;
-  await apiRequest("/gateways/cameras/discovered", {
+async function uploadToServer(cameras: DiscoveredCamera[]): Promise<DiscoveredCamera[]> {
+  if (cameras.length === 0) return [];
+  const response = await apiRequest<{
+    registered: Array<{
+      serialNumber: string;
+      cameraId: string;
+      streamKey: string;
+      liveUrl: string;
+      publishUrl: string | null;
+    }>;
+  }>("/gateways/cameras/discovered", {
     method: "POST",
     body: JSON.stringify({
       cameras: cameras.map((c) => ({
@@ -138,6 +149,14 @@ async function uploadToServer(cameras: DiscoveredCamera[]) {
         mac: c.mac,
       })),
     }),
+  });
+
+  const bySerial = new Map(response.registered.map((camera) => [camera.serialNumber, camera]));
+  return cameras.map((camera) => {
+    const registered = bySerial.get(camera.serialNumber);
+    return registered?.publishUrl
+      ? { ...camera, ...registered, publishUrl: registered.publishUrl }
+      : camera;
   });
 }
 

@@ -11,6 +11,12 @@ export type GatewayCamera = {
   configuredFps: number;
   username: string | null;
   password: string | null;
+  // Identificadores físicos (XM/iCSee). Quando o gateway está em modo
+  // MediaMTX, ignora streamUrl e usa serialNumber como stream key:
+  // rtsp://${mediaServer}/live/<serialNumber>
+  bluetoothMac?: string | null;
+  serialNumber?: string | null;
+  wifiSsid?: string | null;
 };
 
 export type CameraHealthStatus = "ONLINE" | "OFFLINE" | "DEGRADED" | "ERROR";

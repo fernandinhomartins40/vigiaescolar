@@ -109,6 +109,8 @@ export type Camera = {
   };
   usuario?: string;
   senha?: string;
+  serialNumber?: string;
+  liveUrl?: string;
   tenantId?: string;
 };
 

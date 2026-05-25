@@ -49,6 +49,11 @@ const recognitionSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+const streamEventSchema = z.object({
+  stream: z.string().trim().min(1),
+  action: z.enum(["online", "offline"]),
+});
+
 function safeDecryptSecret(value: string | null) {
   if (!value) {
     return null;
@@ -123,10 +128,71 @@ router.get(
         recognitionEndTime: camera.recognitionEndTime,
         username: camera.username,
         password: safeDecryptSecret(camera.passwordEncrypted),
+        // Identificadores físicos (preenchidos pelo APK configurador via BLE).
+        // O gateway usa serialNumber como stream key para resolver câmeras
+        // que publicam via RTMPS em rtmps://.../live/<serialNumber>.
+        bluetoothMac: camera.bluetoothMac,
+        serialNumber: camera.serialNumber,
+        wifiSsid: camera.wifiSsid,
         school: camera.school,
         runtimeStatus: camera.runtimeStatus,
       })),
       timestamp: new Date().toISOString(),
+    });
+  }),
+);
+
+/**
+ * Resolve um SerialNumber para os dados da câmera. Usado pelo camera-gateway
+ * quando o MediaMTX notifica que um stream RTMPS entrou em "live/<SN>" via
+ * runOnReady hook. O gateway descobre qual câmera/tenant/escola corresponde
+ * àquele stream e começa a capturar frames.
+ */
+router.get(
+  "/cameras/by-serial/:serialNumber",
+  asyncHandler(async (req, res) => {
+    const serial = String(req.params.serialNumber ?? "").trim();
+    if (!serial) {
+      res.status(400).json({ error: "serialNumber é obrigatório" });
+      return;
+    }
+    const camera = await prisma.camera.findFirst({
+      where: {
+        serialNumber: serial,
+        status: CameraStatus.ACTIVE,
+      },
+      include: {
+        school: {
+          select: {
+            id: true,
+            name: true,
+            openingTime: true,
+            closingTime: true,
+            toleranceMinutes: true,
+          },
+        },
+      },
+    });
+    if (!camera) {
+      res.status(404).json({ error: "Câmera não encontrada com este SerialNumber" });
+      return;
+    }
+    res.json({
+      id: camera.id,
+      tenantId: camera.tenantId,
+      schoolId: camera.schoolId,
+      name: camera.name,
+      location: camera.location,
+      type: camera.type,
+      streamUrl: camera.streamUrl,
+      resolution: camera.resolution,
+      configuredFps: camera.fps,
+      username: camera.username,
+      password: safeDecryptSecret(camera.passwordEncrypted),
+      bluetoothMac: camera.bluetoothMac,
+      serialNumber: camera.serialNumber,
+      wifiSsid: camera.wifiSsid,
+      school: camera.school,
     });
   }),
 );
@@ -188,6 +254,55 @@ router.post(
       ok: true,
       runtimeStatus,
     });
+  }),
+);
+
+router.post(
+  "/stream-event",
+  asyncHandler(async (req, res) => {
+    const body = streamEventSchema.parse(req.body);
+    const serialNumber = body.stream.replace(/^live\//, "").trim();
+    const camera = await prisma.camera.findFirst({
+      where: { serialNumber, status: CameraStatus.ACTIVE },
+      select: {
+        id: true,
+        tenantId: true,
+        schoolId: true,
+        runtimeStatus: { select: { gatewayId: true } },
+      },
+    });
+
+    if (!camera) {
+      res.status(202).json({ ok: true, ignored: true });
+      return;
+    }
+
+    const online = body.action === "online";
+    const gatewayId = camera.runtimeStatus?.gatewayId ?? "desktop-relay";
+    await prisma.cameraRuntimeStatus.upsert({
+      where: { cameraId: camera.id },
+      create: {
+        tenantId: camera.tenantId,
+        schoolId: camera.schoolId,
+        cameraId: camera.id,
+        gatewayId,
+        healthStatus: online ? "ONLINE" : "OFFLINE",
+        lastHeartbeatAt: new Date(),
+        lastFrameAt: online ? new Date() : null,
+        lastError: online ? null : "Stream ao vivo desconectado.",
+        metadata: { transport: "dvrip-rtmps-mediamtx" },
+      },
+      update: {
+        gatewayId,
+        healthStatus: online ? "ONLINE" : "OFFLINE",
+        lastHeartbeatAt: new Date(),
+        ...(online ? { lastFrameAt: new Date() } : {}),
+        lastError: online ? null : "Stream ao vivo desconectado.",
+        metadata: { transport: "dvrip-rtmps-mediamtx" },
+      },
+    });
+
+    res.json({ ok: true, cameraId: camera.id, online });
   }),
 );
 

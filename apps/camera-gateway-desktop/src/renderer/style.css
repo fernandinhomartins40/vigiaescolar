@@ -74,3 +74,10 @@ button {
 .kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 12px; }
 .kv .k { color: var(--muted); }
 .kv .v { font-family: ui-monospace, monospace; }
+
+.app-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 16px 24px;
+}
+.app-meta h2 { margin-bottom: 4px; }
+.app-meta p { margin: 0; }

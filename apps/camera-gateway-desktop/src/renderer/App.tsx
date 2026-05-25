@@ -16,7 +16,11 @@ export function App() {
   useEffect(() => {
     refresh();
     const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
+    const unsubscribe = window.gateway.onStatusChanged(refresh);
+    return () => {
+      clearInterval(id);
+      unsubscribe();
+    };
   }, [refresh]);
 
   async function handlePair() {
@@ -49,6 +53,11 @@ export function App() {
     await window.gateway.discoverNow();
     setOkMsg("Procurando câmeras na rede local...");
     setTimeout(refresh, 4000);
+  }
+
+  async function handleCheckUpdates() {
+    await window.gateway.checkForUpdates();
+    await refresh();
   }
 
   if (!status) {
@@ -123,7 +132,7 @@ export function App() {
               Câmeras detectadas ({status.lastDiscoveredCameras.length}){" "}
               <span className="status-badge online">conectado</span>
             </h2>
-            <p>O gateway varre a rede local a cada 5 minutos. As câmeras encontradas são enviadas automaticamente para o servidor.</p>
+            <p>O gateway varre a rede local a cada 5 minutos e transmite vídeo ao vivo continuamente para o servidor.</p>
             <div className="row" style={{ marginBottom: 16 }}>
               <button className="btn-secondary" onClick={handleDiscover}>
                 Procurar agora
@@ -147,7 +156,9 @@ export function App() {
                       {cam.ip} · SN: {cam.serialNumber.substring(0, 16) || "—"} · {cam.hardware}
                     </div>
                   </div>
-                  <span className="status-badge online">online</span>
+                  <span className={`status-badge ${cam.publishUrl ? "online" : "offline"}`}>
+                    {cam.publishUrl ? "transmitindo" : "aguardando servidor"}
+                  </span>
                 </div>
               ))
             )}
@@ -156,6 +167,22 @@ export function App() {
       )}
 
       {okMsg && status.paired && <p className="success">{okMsg}</p>}
+
+      <div className="card app-meta">
+        <div>
+          <h2>Aplicativo</h2>
+          <p>
+            Versão {status.appVersion} · {status.update.message}
+          </p>
+        </div>
+        <button
+          className="btn-secondary"
+          onClick={handleCheckUpdates}
+          disabled={status.update.state === "checking"}
+        >
+          {status.update.state === "checking" ? "Verificando..." : "Verificar atualização"}
+        </button>
+      </div>
     </div>
   );
 }

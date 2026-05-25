@@ -10,9 +10,9 @@
  *  - DELETE /:id         — admin revoga um gateway
  */
 import crypto from "node:crypto";
-import { Router, raw } from "express";
+import { Router, raw, type Request } from "express";
 import { z } from "zod";
-import { CameraStatus, GatewayStatus, Prisma } from "@prisma/client";
+import { CameraStatus, CameraType, GatewayStatus } from "@prisma/client";
 
 import { asyncHandler } from "../lib/http";
 import { prisma } from "../lib/prisma";
@@ -24,6 +24,38 @@ const router = Router();
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const TOKEN_BYTES = 32;
+
+function streamKey(serialNumber: string) {
+  return serialNumber.replace(/[^A-Za-z0-9_-]/g, "");
+}
+
+async function resolveGatewaySchool(tenantId: string, schoolId: string | null) {
+  if (schoolId) return schoolId;
+
+  const schools = await prisma.school.findMany({
+    where: { tenantId },
+    select: { id: true },
+    take: 2,
+  });
+
+  return schools.length === 1 ? schools[0].id : null;
+}
+
+function relayUrls(serialNumber: string, cameraId: string) {
+  const key = streamKey(serialNumber);
+  const scheme = process.env.MEDIA_INGEST_SCHEME?.trim() === "rtmp" ? "rtmp" : "rtmps";
+  const host = process.env.MEDIA_INGEST_HOST?.trim() || "vigiaescolar.com.br";
+  const port = process.env.MEDIA_INGEST_PORT?.trim() || "1936";
+  const publishToken = process.env.CAMERA_PUBLISH_TOKEN?.trim() || "";
+
+  return {
+    streamKey: key,
+    liveUrl: `/api/cameras/${encodeURIComponent(cameraId)}/live/index.m3u8`,
+    publishUrl: publishToken
+      ? `${scheme}://${host}:${port}/live/${encodeURIComponent(key)}?user=cam&pass=${encodeURIComponent(publishToken)}`
+      : null,
+  };
+}
 
 // ─── Geração de código (admin do painel) ────────────────────────────────────
 const generateCodeSchema = z.object({
@@ -144,7 +176,7 @@ router.post(
 );
 
 // ─── Helper: middleware Bearer pra rotas autenticadas por gateway ──────────
-export async function loadGatewayFromBearer(req: any): Promise<{ gatewayId: string; tenantId: string; schoolId: string | null } | null> {
+export async function loadGatewayFromBearer(req: Request): Promise<{ gatewayId: string; tenantId: string; schoolId: string | null } | null> {
   const auth = req.headers.authorization;
   if (!auth?.startsWith("Bearer ")) return null;
   const token = auth.substring(7).trim();
@@ -207,18 +239,86 @@ router.post(
       return;
     }
     const body = discoveredSchema.parse(req.body ?? {});
-
-    // Atualiza IP/streamUrl para cada câmera cadastrada com aquele SerialNumber
-    let updated = 0;
-    for (const cam of body.cameras) {
-      const result = await prisma.camera.updateMany({
-        where: { tenantId: ctx.tenantId, serialNumber: cam.serialNumber },
-        data: {
-          // Mantém streamUrl gravado pelo APK (rtsp://vigiaescolar.com.br:8554/live/<SN>)
-          // mas registra IP/MAC observados para diagnóstico.
-        } as Prisma.CameraUpdateManyMutationInput,
+    const schoolId = await resolveGatewaySchool(ctx.tenantId, ctx.schoolId);
+    if (!schoolId) {
+      res.status(409).json({
+        error: "Associe o gateway a uma escola antes de cadastrar cameras automaticamente.",
+        code: "GATEWAY_SCHOOL_REQUIRED",
       });
-      updated += result.count;
+      return;
+    }
+
+    const registered = [];
+    for (const cam of body.cameras) {
+      const key = streamKey(cam.serialNumber);
+      if (!key) continue;
+
+      const existing = await prisma.camera.findFirst({
+        where: { tenantId: ctx.tenantId, serialNumber: cam.serialNumber },
+        select: { id: true },
+      });
+
+      const baseData = {
+        schoolId,
+        name: cam.deviceModel || `Camera ${key.slice(-6)}`,
+        location: `Gateway - ${cam.ip}`,
+        type: CameraType.RTSP,
+        resolution: "1080p",
+        fps: 15,
+        status: CameraStatus.ACTIVE,
+        serialNumber: cam.serialNumber,
+        bluetoothMac: cam.mac || undefined,
+      };
+
+      const camera = existing
+        ? await prisma.camera.update({
+            where: { id: existing.id },
+            data: {
+              ...baseData,
+              streamUrl: relayUrls(cam.serialNumber, existing.id).liveUrl,
+            },
+          })
+        : await prisma.camera.create({
+            data: {
+              tenantId: ctx.tenantId,
+              ...baseData,
+              streamUrl: "pending://live",
+            },
+          });
+
+      const urls = relayUrls(cam.serialNumber, camera.id);
+      if (!existing) {
+        await prisma.camera.update({
+          where: { id: camera.id },
+          data: { streamUrl: urls.liveUrl },
+        });
+      }
+
+      await prisma.cameraRuntimeStatus.upsert({
+        where: { cameraId: camera.id },
+        create: {
+          tenantId: ctx.tenantId,
+          schoolId,
+          cameraId: camera.id,
+          gatewayId: ctx.gatewayId,
+          healthStatus: "OFFLINE",
+          lastHeartbeatAt: new Date(),
+          metadata: { serialNumber: cam.serialNumber, cameraIp: cam.ip, relay: "go2rtc-dvrip" },
+        },
+        update: {
+          gatewayId: ctx.gatewayId,
+          lastHeartbeatAt: new Date(),
+          metadata: { serialNumber: cam.serialNumber, cameraIp: cam.ip, relay: "go2rtc-dvrip" },
+        },
+      });
+
+      registered.push({
+        serialNumber: cam.serialNumber,
+        cameraId: camera.id,
+        streamKey: urls.streamKey,
+        liveUrl: urls.liveUrl,
+        publishUrl: urls.publishUrl,
+      });
     }
 
     await prisma.gateway.update({
@@ -226,7 +326,12 @@ router.post(
       data: { lastSeenAt: new Date(), status: GatewayStatus.ACTIVE },
     });
 
-    res.json({ ok: true, updated, received: body.cameras.length });
+    res.json({
+      ok: true,
+      received: body.cameras.length,
+      registered,
+      relayEnabled: registered.every((camera) => !!camera.publishUrl),
+    });
   }),
 );
 

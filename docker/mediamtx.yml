@@ -1,0 +1,63 @@
+# Video ao vivo publicado pelo gateway desktop.
+# A camera XM permanece na LAN; o PC da escola a le por DVRIP usando go2rtc
+# e publica continuamente em rtmps://HOST:1936/live/<SerialNumber>.
+
+logLevel: info
+logDestinations: [stdout]
+writeQueueSize: 512
+
+authMethod: internal
+authInternalUsers:
+  - user: cam
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path: "~^live/[A-Za-z0-9_-]+$"
+  - user: gateway
+    pass:
+    ips: []
+    permissions:
+      - action: read
+        path: "~^live/[A-Za-z0-9_-]+$"
+
+rtsp: yes
+protocols: [tcp]
+rtspAddress: :8554
+
+rtmp: yes
+rtmpAddress: :1935
+rtmpEncryption: strict
+rtmpsAddress: :1936
+rtmpServerKey: /etc/letsencrypt/live/vigiaescolar.com.br/privkey.pem
+rtmpServerCert: /etc/letsencrypt/live/vigiaescolar.com.br/fullchain.pem
+
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigin: "*"
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+
+webrtc: no
+srt: no
+
+pathDefaults:
+  source: publisher
+  record: no
+
+paths:
+  "~^live/[A-Za-z0-9_-]+$":
+    runOnReady: >
+      curl -fsS -X POST
+      -H "Authorization: Bearer $CAMERA_GATEWAY_SERVICE_TOKEN"
+      -H "Content-Type: application/json"
+      -d "{\"stream\":\"$MTX_PATH\",\"action\":\"online\"}"
+      http://api:3001/api/internal/camera-gateway/stream-event
+    runOnNotReady: >
+      curl -fsS -X POST
+      -H "Authorization: Bearer $CAMERA_GATEWAY_SERVICE_TOKEN"
+      -H "Content-Type: application/json"
+      -d "{\"stream\":\"$MTX_PATH\",\"action\":\"offline\"}"
+      http://api:3001/api/internal/camera-gateway/stream-event
