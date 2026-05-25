@@ -16,7 +16,7 @@ Saída em `apps/camera-gateway-desktop/release/`:
 - `latest.yml` — manifesto para auto-update
 - `*.blockmap` — diff blocks para download incremental
 
-O build baixa e incorpora `go2rtc.exe` v1.9.14, que lê as câmeras XM pela porta DVRIP 34567 e publica o vídeo continuamente para a VPS.
+O build baixa e incorpora `go2rtc.exe` v1.9.14, que lê as câmeras XM pela porta DVRIP 34567 e publica o vídeo continuamente para a VPS. Alterações em `apps/camera-gateway-desktop/` enviadas para `main` acionam `.github/workflows/gateway-installer.yml`, que faz esse build em Windows e publica os arquivos abaixo na VPS automaticamente.
 
 ## 2. Variáveis da VPS
 
@@ -31,7 +31,7 @@ MEDIA_INGEST_PORT=1936
 
 O deploy gera `CAMERA_PUBLISH_TOKEN` automaticamente quando ele ainda não existe. O `docker-compose.prod.yml` inicia o MediaMTX com RTMPS usando o certificado Let's Encrypt existente, entrega HLS somente através da API autenticada e configura o processador facial para ler o RTSP interno.
 
-## 3. Upload do instalador
+## 3. Upload manual do instalador (fallback)
 
 ```bash
 # Substitua a versão pela atual

@@ -215,6 +215,7 @@ services:
       - "127.0.0.1:7003:7003"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - /var/www/vigiaescolar-static/downloads:/var/www/downloads:ro
     networks:
       - internal
 

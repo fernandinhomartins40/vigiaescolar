@@ -57,9 +57,8 @@ O `electron-builder.yml` está configurado para buscar updates em `https://vigia
 
 1. Bump da versão em `package.json`
 2. `npm run gateway:installer`
-3. Upload do `release/*.exe`, `release/*.yml` (latest.yml) e `release/*.blockmap` para `/var/www/vigiaescolar-static/downloads/gateway/` na VPS
-4. Publique também uma cópia estável chamada `VigiaEscolar-Gateway-Setup.exe`, usada pelo botão de download no painel
-5. Apps existentes consultam updates ao iniciar e periodicamente, baixando a nova versão para aplicação no próximo restart
+3. Envie a alteração para `main`; o workflow `Publish Gateway Installer` compila no Windows e publica os `.exe`, `latest.yml` e `.blockmap` na VPS
+4. Apps existentes consultam updates ao iniciar e periodicamente, baixando a nova versão para aplicação no próximo restart
 
 ## Arquitetura interna
 

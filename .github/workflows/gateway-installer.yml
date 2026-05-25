@@ -1,0 +1,72 @@
+name: Publish Gateway Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/gateway-installer.yml"
+      - "apps/camera-gateway-desktop/**"
+      - "package.json"
+      - "package-lock.json"
+
+env:
+  VPS_HOST: 72.60.10.108
+  VPS_USER: root
+  SSH_OPTS: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+
+jobs:
+  build:
+    name: Build Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer with live relay
+        run: npm run gateway:installer
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vigiaescolar-gateway-installer
+          path: |
+            apps/camera-gateway-desktop/release/VigiaEscolar-Gateway-Setup.exe
+            apps/camera-gateway-desktop/release/VigiaEscolar-Gateway-Setup-*.exe
+            apps/camera-gateway-desktop/release/latest.yml
+            apps/camera-gateway-desktop/release/*.blockmap
+          if-no-files-found: error
+
+  publish:
+    name: Publish download on VPS
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vigiaescolar-gateway-installer
+          path: release
+
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y sshpass
+
+      - name: Upload installer files
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          sshpass -e ssh $SSH_OPTS $VPS_USER@$VPS_HOST \
+            "mkdir -p /var/www/vigiaescolar-static/downloads/gateway"
+          sshpass -e scp $SSH_OPTS release/* $VPS_USER@$VPS_HOST:/var/www/vigiaescolar-static/downloads/gateway/

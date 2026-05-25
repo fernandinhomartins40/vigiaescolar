@@ -128,6 +128,7 @@ fi
 # ─── 5. Docker: build e up preservando volumes ───────────────────────────────
 echo "==> [5/7] Subindo serviços Docker (preservando volumes)..."
 cd "$APP_DIR"
+mkdir -p /var/www/vigiaescolar-static/downloads/gateway
 
 # Build das imagens sem derrubar os containers ainda
 $COMPOSE build --parallel
