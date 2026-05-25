@@ -7,7 +7,6 @@ import {
   Copy,
   Plus,
   CheckCircle2,
-  XCircle,
   Clock,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -31,25 +30,26 @@ import { useTenantResourceKeyFactory } from "@/context/auth-context";
 import {
   type GatewayDTO,
   createGatewayPairingCode,
-  getEscolas,
+  listSchools,
   listGateways,
   revokeGateway,
 } from "@/lib/resources";
 
-const GATEWAY_DOWNLOAD_URL = "https://vigiaescolar.com.br/downloads/gateway/";
+const GATEWAY_DOWNLOAD_URL =
+  "https://vigiaescolar.com.br/downloads/gateway/VigiaEscolar-Gateway-Setup.exe";
 
 export default function Gateways() {
-  const keyFor = useTenantResourceKeyFactory();
+  const keys = useTenantResourceKeyFactory();
   const queryClient = useQueryClient();
 
   const gatewaysQuery = useQuery({
-    queryKey: keyFor("gateways"),
+    queryKey: keys.gateways,
     queryFn: listGateways,
   });
 
   const escolasQuery = useQuery({
-    queryKey: keyFor("escolas"),
-    queryFn: getEscolas,
+    queryKey: keys.schools,
+    queryFn: listSchools,
   });
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -72,7 +72,7 @@ export default function Gateways() {
     mutationFn: revokeGateway,
     onSuccess: () => {
       toast.success("Gateway revogado");
-      queryClient.invalidateQueries({ queryKey: keyFor("gateways") });
+      queryClient.invalidateQueries({ queryKey: keys.gateways });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -93,7 +93,7 @@ export default function Gateways() {
   function handleCloseDialog() {
     setDialogOpen(false);
     setGeneratedCode(null);
-    queryClient.invalidateQueries({ queryKey: keyFor("gateways") });
+    queryClient.invalidateQueries({ queryKey: keys.gateways });
   }
 
   return (

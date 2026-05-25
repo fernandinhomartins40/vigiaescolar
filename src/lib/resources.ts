@@ -35,6 +35,7 @@ export const resourceKeys = {
   settings: (tenantId?: string | null) => ["settings", tenantId ?? "global"] as const,
   guardianPortal: (tenantId?: string | null) => ["guardian-portal", tenantId ?? "global"] as const,
   dashboard: (tenantId?: string | null) => ["dashboard", tenantId ?? "global"] as const,
+  gateways: (tenantId?: string | null) => ["gateways", tenantId ?? "global"] as const,
 } as const;
 
 export async function login(payload: LoginPayload) {

@@ -140,6 +140,7 @@ export function useTenantResourceKeyFactory() {
       settings: resourceKeys.settings(tenantId),
       guardianPortal: resourceKeys.guardianPortal(tenantId),
       dashboard: resourceKeys.dashboard(tenantId),
+      gateways: resourceKeys.gateways(tenantId),
     }),
     [tenantId],
   );
