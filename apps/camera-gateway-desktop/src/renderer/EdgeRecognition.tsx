@@ -137,18 +137,48 @@ function findEdgeCamera(edge: EdgeSyncStateDTO, camera: DiscoveredCameraDTO | nu
   return edge.cameras.find((item) => item.serialNumber === camera.serialNumber) ?? null;
 }
 
+function attachHls(video: HTMLVideoElement, url: string): Hls | null {
+  video.crossOrigin = "anonymous";
+  video.muted = true;
+  video.playsInline = true;
+
+  if (Hls.isSupported()) {
+    const hls = new Hls({
+      lowLatencyMode: true,
+      backBufferLength: 10,
+      // Reduz retentativas iniciais para que erros de stream apareçam mais rápido
+      manifestLoadingMaxRetry: 3,
+      levelLoadingMaxRetry: 3,
+      fragLoadingMaxRetry: 3,
+    });
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => undefined);
+    });
+    return hls;
+  }
+
+  // Fallback nativo (Safari / Electron com suporte HLS built-in)
+  video.src = url;
+  video.play().catch(() => undefined);
+  return null;
+}
+
 export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDTO[]; edge: EdgeSyncStateDTO }) {
   const [selectedSerial, setSelectedSerial] = useState("");
-  const [message, setMessage] = useState("Aguardando camera local.");
+  const [message, setMessage] = useState("Aguardando câmera local.");
   const [matches, setMatches] = useState<Match[]>([]);
-  const [running, setRunning] = useState(false);
+  const [recognizing, setRecognizing] = useState(false);
   const [modelsReady, setModelsReady] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const timerRef = useRef<number | null>(null);
   const analyzingRef = useRef(false);
   const cooldownRef = useRef<Map<string, number>>(new Map());
+  const currentUrlRef = useRef<string | null>(null);
 
   const selectedCamera = useMemo(() => {
     if (!cameras.length) return null;
@@ -166,11 +196,17 @@ export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDT
   useEffect(() => {
     loadModels().then((ok) => {
       setModelsReady(ok);
-      setMessage(ok ? "Motor local carregado." : "Falha ao carregar modelos locais.");
+      if (!ok) setMessage("Falha ao carregar modelos locais.");
     });
   }, []);
 
-  const stop = useCallback(() => {
+  // Inicia/reinicia o stream de vídeo sempre que a URL da câmera muda
+  useEffect(() => {
+    const url = selectedCamera?.localLiveUrl ?? null;
+    if (url === currentUrlRef.current) return;
+    currentUrlRef.current = url;
+
+    // Limpa stream anterior
     if (timerRef.current) window.clearInterval(timerRef.current);
     timerRef.current = null;
     hlsRef.current?.destroy();
@@ -181,7 +217,51 @@ export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDT
       video.removeAttribute("src");
       video.load();
     }
-    setRunning(false);
+    setMatches([]);
+    setStreamError(null);
+    setRecognizing(false);
+
+    if (!url || !video) {
+      setMessage(selectedCamera ? "Relay de vídeo aguardando... Aguarde o go2rtc iniciar." : "Aguardando câmera local.");
+      return;
+    }
+
+    setMessage("Conectando ao stream de vídeo...");
+
+    const hls = attachHls(video, url);
+    hlsRef.current = hls;
+
+    if (hls) {
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          const msg = `Erro no stream: ${data.type} — ${data.details}`;
+          console.warn("[edge-video]", msg);
+          setStreamError(msg);
+          setMessage("Falha no stream. Verifique se a câmera está acessível na rede.");
+        }
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setStreamError(null);
+        setMessage("Vídeo ao vivo conectado.");
+      });
+    }
+
+    video.addEventListener("playing", onPlaying, { once: true });
+    function onPlaying() {
+      setMessage(modelsReady ? "Vídeo ao vivo. Clique em Iniciar reconhecimento." : "Vídeo ao vivo. Carregando modelos...");
+    }
+  }, [selectedCamera?.localLiveUrl]);
+
+  const stopRecognition = useCallback(() => {
+    if (timerRef.current) window.clearInterval(timerRef.current);
+    timerRef.current = null;
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    setMatches([]);
+    setRecognizing(false);
   }, []);
 
   const sendMatch = useCallback(async (match: Match) => {
@@ -226,7 +306,7 @@ export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDT
       setMatches(nextMatches);
       setMessage(
         references.length === 0
-          ? "Sem referencias sincronizadas."
+          ? "Sem referências sincronizadas."
           : nextMatches.length
             ? `${nextMatches.length} rosto(s), ${nextMatches.filter((m) => m.status === "MATCHED").length} reconhecido(s).`
             : "Nenhum rosto detectado.",
@@ -257,73 +337,90 @@ export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDT
     }
   }, [modelsReady, references, sendMatch]);
 
-  const start = useCallback(async () => {
+  const startRecognition = useCallback(async () => {
     if (!selectedCamera?.localLiveUrl) {
-      setMessage("Stream local ainda nao foi configurado.");
-      return;
-    }
-    if (!selectedEdgeCamera) {
-      setMessage("Camera ainda nao sincronizada com a API.");
+      setMessage("Stream local ainda não foi configurado.");
       return;
     }
     if (!modelsReady) {
       setMessage("Modelos locais ainda carregando.");
       return;
     }
-
-    stop();
-    const video = videoRef.current;
-    if (!video) return;
-    video.crossOrigin = "anonymous";
-    video.muted = true;
-    video.playsInline = true;
-
-    if (Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, backBufferLength: 10 });
-      hlsRef.current = hls;
-      hls.loadSource(selectedCamera.localLiveUrl);
-      hls.attachMedia(video);
-    } else {
-      video.src = selectedCamera.localLiveUrl;
+    if (!selectedEdgeCamera) {
+      setMessage("Câmera ainda não sincronizada com a API. Clique em 'Sincronizar faces'.");
+      return;
     }
-    await video.play().catch(() => undefined);
-    timerRef.current = window.setInterval(() => void analyze(), analysisIntervalMs);
-    setRunning(true);
-    setMessage("Reconhecimento local em execucao.");
-  }, [analysisIntervalMs, analyze, modelsReady, selectedCamera, selectedEdgeCamera, stop]);
 
-  useEffect(() => stop, [stop]);
+    stopRecognition();
+    timerRef.current = window.setInterval(() => void analyze(), analysisIntervalMs);
+    setRecognizing(true);
+    setMessage("Reconhecimento local em execução.");
+  }, [analysisIntervalMs, analyze, modelsReady, selectedCamera, selectedEdgeCamera, stopRecognition]);
+
+  // Para reconhecimento ao destruir
+  useEffect(() => () => {
+    stopRecognition();
+    hlsRef.current?.destroy();
+  }, [stopRecognition]);
 
   if (cameras.length === 0) {
     return (
       <div className="card">
         <h2>Reconhecimento local</h2>
-        <p>Nenhuma camera local detectada ainda.</p>
+        <p>Nenhuma câmera local detectada ainda.</p>
       </div>
     );
   }
+
+  const hasStream = !!selectedCamera?.localLiveUrl;
 
   return (
     <div className="card edge-card">
       <h2>Reconhecimento facial local</h2>
       <p>
-        Video e processamento rodam neste PC. A VPS recebe apenas eventos de entrada/saida.
-        Referencias sincronizadas: {references.length}.
+        Vídeo e processamento rodam neste PC. A VPS recebe apenas eventos de entrada/saída.
+        Referências sincronizadas: {references.length}.
       </p>
       <div className="row edge-toolbar">
-        <select value={selectedCamera?.serialNumber ?? ""} onChange={(event) => setSelectedSerial(event.target.value)}>
+        <select
+          aria-label="Câmera"
+          value={selectedCamera?.serialNumber ?? ""}
+          onChange={(event) => setSelectedSerial(event.target.value)}
+        >
           {cameras.map((camera) => (
             <option key={camera.serialNumber} value={camera.serialNumber}>
-              {camera.deviceModel || "Camera"} - {camera.ip}
+              {camera.deviceModel || "Câmera"} — {camera.ip}
             </option>
           ))}
         </select>
-        <button className="btn-primary" disabled={running || !modelsReady} onClick={start}>Iniciar local</button>
-        <button className="btn-secondary" disabled={!running} onClick={stop}>Parar</button>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={recognizing || !modelsReady || !hasStream || !selectedEdgeCamera}
+          onClick={startRecognition}
+          title={
+            !hasStream ? "Aguardando relay de vídeo" :
+            !selectedEdgeCamera ? "Câmera não sincronizada com a API" :
+            !modelsReady ? "Carregando modelos de IA" : ""
+          }
+        >
+          Iniciar reconhecimento
+        </button>
+        <button type="button" className="btn-secondary" disabled={!recognizing} onClick={stopRecognition}>Parar</button>
       </div>
       <div className="edge-video-wrap">
         <video ref={videoRef} className="edge-video" muted playsInline />
         <canvas ref={canvasRef} className="edge-overlay" />
+        {!hasStream && (
+          <div className="edge-no-stream">
+            <span>⏳ Aguardando relay de vídeo (go2rtc)…</span>
+          </div>
+        )}
+        {hasStream && streamError && (
+          <div className="edge-no-stream edge-stream-error">
+            <span>⚠️ {streamError}</span>
+          </div>
+        )}
       </div>
       <p className="edge-message">{message}</p>
       {matches.length > 0 && (

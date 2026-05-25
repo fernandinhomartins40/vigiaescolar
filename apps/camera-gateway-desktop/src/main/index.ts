@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { autoUpdater } from "electron-updater";
 import { config, saveConfig } from "./config";
 import { runDiscoveryLoop, stopDiscovery } from "./lanDiscovery";
-import { localHlsUrl, runStreamRelay, stopStreamRelay } from "./streamRelay";
+import { isRelayRunning, localHlsUrl, runStreamRelay, stopStreamRelay } from "./streamRelay";
 import { pairWithServer } from "./pairing";
 import {
   edgeSyncState,
@@ -178,7 +178,7 @@ ipcMain.handle("config:get", () => {
     apiBaseUrl: c.apiBaseUrl,
     lastDiscoveredCameras: (c.lastDiscoveredCameras ?? []).map((camera) => ({
       ...camera,
-      localLiveUrl: localHlsUrl(camera),
+      localLiveUrl: isRelayRunning() ? localHlsUrl(camera) : undefined,
     })),
     lastSyncAt: c.lastSyncAt,
     edge: config.get("edge"),

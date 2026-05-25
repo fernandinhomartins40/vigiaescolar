@@ -104,6 +104,19 @@ button {
 }
 .edge-video { object-fit: contain; }
 .edge-overlay { pointer-events: none; }
+.edge-no-stream {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 6, 23, 0.75);
+  color: #94a3b8;
+  font-size: 13px;
+  text-align: center;
+  padding: 16px;
+}
+.edge-stream-error { color: #fca5a5; }
 .edge-message { margin-top: 10px; margin-bottom: 8px; }
 .edge-matches { display: flex; flex-wrap: wrap; gap: 6px; }
 

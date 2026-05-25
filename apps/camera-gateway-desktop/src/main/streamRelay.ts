@@ -167,6 +167,10 @@ async function sendHeartbeat() {
   }
 }
 
+export function isRelayRunning() {
+  return relay !== null;
+}
+
 export function runStreamRelay() {
   stopping = false;
   if (!heartbeatTimer) {
