@@ -11,6 +11,7 @@ App Electron que roda em um PC com Windows na **mesma rede Wi-Fi das câmeras** 
 - Câmera fica na rede da escola, **sem precisar de port forward, sem VPN, sem hardware adicional**
 - O gateway abre uma conexão **de saída** com a VPS (passa por qualquer firewall doméstico)
 - Vídeo ao vivo é publicado continuamente; o reconhecimento lê o mesmo stream
+- Se a câmera fornecer apenas H265, o gateway converte para H264 localmente antes da publicação
 - Funciona em qualquer Windows 10 ou 11 que já exista na escola
 
 ## Pareamento (configuração inicial)
@@ -45,7 +46,7 @@ npm install
 npm run gateway:installer
 ```
 
-O instalador assistido é gerado em `apps/camera-gateway-desktop/release/VigiaEscolar-Gateway-Setup-0.1.0.exe` (NSIS), junto com a cópia estável `VigiaEscolar-Gateway-Setup.exe` usada pelo painel. Ele instala por usuário, cria atalhos, abre o pareamento ao concluir e inicia minimizado no tray nos próximos logins do Windows.
+O instalador assistido é gerado em `apps/camera-gateway-desktop/release/VigiaEscolar-Gateway-Setup-X.Y.Z.exe` (NSIS), junto com a cópia estável `VigiaEscolar-Gateway-Setup.exe` usada pelo painel. Ele instala por usuário, cria atalhos, abre o pareamento ao concluir e inicia minimizado no tray nos próximos logins do Windows.
 
 ### Assinatura digital
 
@@ -67,7 +68,7 @@ O `electron-builder.yml` está configurado para buscar updates em `https://vigia
 - `src/main/pairing.ts` — `POST /api/gateways/pair` + helpers HTTP autenticados
 - `src/main/dvrip.ts` — login e descoberta DVRIP das câmeras XM
 - `src/main/lanDiscovery.ts` — varredura `/24` da subnet local a cada 5 min
-- `src/main/streamRelay.ts` — inicia `go2rtc` com fonte `dvrip://` e publica vídeo contínuo via RTMPS
+- `src/main/streamRelay.ts` — inicia `go2rtc` com fonte `dvrip://`, usando FFmpeg como fallback H264, e publica vídeo contínuo via RTMPS
 - `src/preload/index.ts` — ponte segura contextBridge entre main e renderer
 - `src/renderer/App.tsx` — UI React (tela de pareamento + tela de status)
 
@@ -79,3 +80,7 @@ O `electron-builder.yml` está configurado para buscar updates em `https://vigia
 | POST | `/api/gateways/heartbeat` | Bearer gateway | Ping a cada 60s |
 | POST | `/api/gateways/cameras/discovered` | Bearer gateway | Cadastra a câmera descoberta e retorna destino RTMPS |
 | GET | `/api/cameras/:id/live/index.m3u8` | Sessão web | Reprodução HLS autenticada do vídeo ao vivo |
+
+## Componentes de terceiros
+
+O instalador inclui `go2rtc` para leitura DVRIP e um binário independente de `FFmpeg` GPLv3 usado somente no fallback de transcodificação H264. O FFmpeg é distribuído como programa separado e sua licença/código-fonte estão disponíveis em https://ffmpeg.org/.

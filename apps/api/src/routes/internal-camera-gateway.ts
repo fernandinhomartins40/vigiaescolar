@@ -79,6 +79,14 @@ function parseOptionalDate(value?: string) {
   return date;
 }
 
+function readRuntimeMetadata(value: Prisma.JsonValue | null | undefined) {
+  if (!value || Array.isArray(value) || typeof value !== "object") {
+    return {} as Record<string, Prisma.JsonValue>;
+  }
+
+  return value as Record<string, Prisma.JsonValue>;
+}
+
 router.get(
   "/cameras",
   asyncHandler(async (req, res) => {
@@ -113,8 +121,15 @@ router.get(
       },
     });
 
+    const availableCameras = isLocal
+      ? cameras
+      : cameras.filter((camera) => {
+          if (!camera.streamUrl.startsWith("/api/cameras/")) return true;
+          return readRuntimeMetadata(camera.runtimeStatus?.metadata).publisherOnline === true;
+        });
+
     res.json({
-      cameras: cameras.map((camera) => ({
+      cameras: availableCameras.map((camera) => ({
         id: camera.id,
         tenantId: camera.tenantId,
         schoolId: camera.schoolId,
@@ -211,6 +226,8 @@ router.post(
         id: true,
         tenantId: true,
         schoolId: true,
+        streamUrl: true,
+        runtimeStatus: { select: { metadata: true } },
       },
     });
 
@@ -220,6 +237,15 @@ router.post(
 
     const lastHeartbeatAt = parseOptionalDate(body.lastHeartbeatAt) ?? new Date();
     const lastFrameAt = parseOptionalDate(body.lastFrameAt);
+    const currentMetadata = readRuntimeMetadata(camera.runtimeStatus?.metadata);
+    const desktopRelay = camera.streamUrl.startsWith("/api/cameras/");
+    const publisherOnline = currentMetadata.publisherOnline === true;
+    const healthStatus = desktopRelay && !publisherOnline ? "OFFLINE" : body.healthStatus;
+    const metadata = {
+      ...currentMetadata,
+      ...(body.metadata ?? {}),
+      ...(desktopRelay ? { publisherOnline } : {}),
+    } as Prisma.InputJsonValue;
 
     const runtimeStatus = await prisma.cameraRuntimeStatus.upsert({
       where: {
@@ -230,23 +256,23 @@ router.post(
         schoolId: camera.schoolId,
         cameraId: camera.id,
         gatewayId: body.gatewayId,
-        healthStatus: body.healthStatus,
+        healthStatus,
         lastHeartbeatAt,
         lastFrameAt,
         lastError: body.lastError ?? null,
         measuredFps: body.measuredFps ?? null,
-        metadata: (body.metadata ?? {}) as Prisma.InputJsonValue,
+        metadata,
       },
       update: {
         tenantId: camera.tenantId,
         schoolId: camera.schoolId,
         gatewayId: body.gatewayId,
-        healthStatus: body.healthStatus,
+        healthStatus,
         lastHeartbeatAt,
         ...(lastFrameAt ? { lastFrameAt } : {}),
         lastError: body.lastError ?? null,
         measuredFps: body.measuredFps ?? null,
-        metadata: (body.metadata ?? {}) as Prisma.InputJsonValue,
+        metadata,
       },
     });
 
@@ -268,7 +294,7 @@ router.post(
         id: true,
         tenantId: true,
         schoolId: true,
-        runtimeStatus: { select: { gatewayId: true } },
+        runtimeStatus: { select: { gatewayId: true, metadata: true } },
       },
     });
 
@@ -279,6 +305,11 @@ router.post(
 
     const online = body.action === "online";
     const gatewayId = camera.runtimeStatus?.gatewayId ?? "desktop-relay";
+    const metadata = {
+      ...readRuntimeMetadata(camera.runtimeStatus?.metadata),
+      transport: "dvrip-rtmps-mediamtx",
+      publisherOnline: online,
+    } as Prisma.InputJsonValue;
     await prisma.cameraRuntimeStatus.upsert({
       where: { cameraId: camera.id },
       create: {
@@ -290,7 +321,7 @@ router.post(
         lastHeartbeatAt: new Date(),
         lastFrameAt: online ? new Date() : null,
         lastError: online ? null : "Stream ao vivo desconectado.",
-        metadata: { transport: "dvrip-rtmps-mediamtx" },
+        metadata,
       },
       update: {
         gatewayId,
@@ -298,7 +329,7 @@ router.post(
         lastHeartbeatAt: new Date(),
         ...(online ? { lastFrameAt: new Date() } : {}),
         lastError: online ? null : "Stream ao vivo desconectado.",
-        metadata: { transport: "dvrip-rtmps-mediamtx" },
+        metadata,
       },
     });
 

@@ -157,7 +157,7 @@ export function App() {
                     </div>
                   </div>
                   <span className={`status-badge ${cam.publishUrl ? "online" : "offline"}`}>
-                    {cam.publishUrl ? "transmitindo" : "aguardando servidor"}
+                    {cam.publishUrl ? "relay configurado" : "aguardando servidor"}
                   </span>
                 </div>
               ))

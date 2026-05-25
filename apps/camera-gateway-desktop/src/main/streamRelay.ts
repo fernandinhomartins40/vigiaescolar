@@ -39,6 +39,14 @@ function binaryPath() {
   return join(__dirname, "..", "..", "vendor", "go2rtc", "go2rtc.exe");
 }
 
+function ffmpegPath() {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, "tools", "ffmpeg.exe");
+  }
+
+  return join(__dirname, "..", "..", "..", "..", "node_modules", "@ffmpeg-installer", "win32-x64", "ffmpeg.exe");
+}
+
 function localConfigPath() {
   return join(app.getPath("userData"), "go2rtc.json");
 }
@@ -55,21 +63,27 @@ function dvripUrl(camera: DiscoveredCamera) {
 }
 
 function createGo2rtcConfig(cameras: Array<DiscoveredCamera & { publishUrl: string }>) {
-  const streams: Record<string, string> = {};
+  const streams: Record<string, string[]> = {};
   const publish: Record<string, string[]> = {};
   const preload: Record<string, string> = {};
 
   for (const camera of cameras) {
     const key = `live_${safeKey(camera)}`;
-    streams[key] = dvripUrl(camera);
+    // RTMPS aceita H264. Se a câmera já fornecer H264, usa o fluxo original;
+    // para câmeras H265, go2rtc ativa o fallback FFmpeg somente sob demanda.
+    streams[key] = [
+      dvripUrl(camera),
+      `ffmpeg:${key}#video=h264`,
+    ];
     publish[key] = [camera.publishUrl];
-    preload[key] = "video";
+    preload[key] = "video=h264";
   }
 
   return {
     api: { listen: "127.0.0.1:1984" },
     rtsp: { listen: "127.0.0.1:8554" },
     webrtc: { listen: "" },
+    ffmpeg: { bin: ffmpegPath() },
     streams,
     publish,
     preload,
@@ -99,6 +113,9 @@ async function launchRelay() {
   if (!fs.existsSync(executable)) {
     console.error(`[stream] go2rtc nao encontrado em ${executable}. Reinstale o gateway atualizado.`);
     return;
+  }
+  if (!fs.existsSync(ffmpegPath())) {
+    console.warn("[stream] FFmpeg nao encontrado; cameras H265 nao poderao ser publicadas.");
   }
 
   const go2rtcConfig = createGo2rtcConfig(cameras);

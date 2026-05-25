@@ -16,7 +16,7 @@ Saída em `apps/camera-gateway-desktop/release/`:
 - `latest.yml` — manifesto para auto-update
 - `*.blockmap` — diff blocks para download incremental
 
-O build baixa e incorpora `go2rtc.exe` v1.9.14, que lê as câmeras XM pela porta DVRIP 34567 e publica o vídeo continuamente para a VPS. Alterações em `apps/camera-gateway-desktop/` enviadas para `main` acionam `.github/workflows/gateway-installer.yml`, que faz esse build em Windows e publica os arquivos abaixo na VPS automaticamente.
+O build baixa e incorpora `go2rtc.exe` v1.9.14, que lê as câmeras XM pela porta DVRIP 34567 e publica o vídeo continuamente para a VPS. Também inclui FFmpeg como fallback: se a câmera fornecer apenas H265, o PC converte o fluxo para H264, codec exigido pela publicação RTMPS. Alterações em `apps/camera-gateway-desktop/` enviadas para `main` acionam `.github/workflows/gateway-installer.yml`, que faz esse build em Windows e publica os arquivos abaixo na VPS automaticamente.
 
 ## 2. Variáveis da VPS
 
@@ -35,7 +35,7 @@ O deploy gera `CAMERA_PUBLISH_TOKEN` automaticamente quando ele ainda não exist
 
 ```bash
 # Substitua a versão pela atual
-VERSION=0.1.0
+VERSION=0.1.1
 RELEASE_DIR=apps/camera-gateway-desktop/release
 
 # Copia para a VPS (servida pelo nginx central):
@@ -80,14 +80,14 @@ chown -R www-data:www-data /var/www/vigiaescolar-static/downloads
 ## 5. Verificação
 
 ```bash
-curl -I https://vigiaescolar.com.br/downloads/gateway/VigiaEscolar-Gateway-Setup-0.1.0.exe
+curl -I https://vigiaescolar.com.br/downloads/gateway/VigiaEscolar-Gateway-Setup-0.1.1.exe
 # 200 OK + Content-Length
 
 curl -I https://vigiaescolar.com.br/downloads/gateway/VigiaEscolar-Gateway-Setup.exe
 # 200 OK; este é o link usado pelo painel
 
 curl https://vigiaescolar.com.br/downloads/gateway/latest.yml
-# version: 0.1.0
+# version: 0.1.1
 # files: ...
 
 # Depois de parear e descobrir a câmera, o painel deve reproduzir:
@@ -104,6 +104,8 @@ Pra usuário leigo, o painel já tem botão "Baixar instalador" apontando direto
 2. O `go2rtc` incluído no instalador abre o stream DVRIP contínuo e publica RTMPS em `live/<SerialNumber>`.
 3. O MediaMTX expõe o mesmo fluxo como RTSP interno para reconhecimento e HLS para a API.
 4. A aba **Vídeo ao Vivo** do painel carrega HLS e o processamento facial analisa frames decodificados do stream.
+
+O MediaMTX marca a câmera online somente depois que a publicação RTMPS existe; o processador facial não abre caminhos RTSP ainda ausentes.
 
 ## Auto-update funcionamento
 
