@@ -12,11 +12,25 @@
 import crypto from "node:crypto";
 import { Router, raw, type Request } from "express";
 import { z } from "zod";
-import { CameraStatus, CameraType, GatewayStatus } from "@prisma/client";
+import {
+  AttendanceStatus,
+  CameraEventType,
+  CameraStatus,
+  CameraType,
+  FaceMatchStatus,
+  FaceRecognitionType,
+  GatewayStatus,
+  NotificationChannel,
+  NotificationStatus,
+  NotificationType,
+  Prisma,
+  StudentStatus,
+} from "@prisma/client";
 
-import { asyncHandler } from "../lib/http";
+import { asyncHandler, badRequest } from "../lib/http";
 import { prisma } from "../lib/prisma";
-import { encryptSecret, decryptSecret } from "../lib/security";
+import { encryptSecret, decryptSecret, formatTime, localDateKey } from "../lib/security";
+import { refreshStudentPresence } from "../lib/presence-state";
 import { requireAuth } from "../middleware/auth";
 import { biometricEngine } from "../services/biometrics/engine";
 
@@ -55,6 +69,40 @@ function relayUrls(serialNumber: string, cameraId: string) {
       ? `${scheme}://${host}:${port}/live/${encodeURIComponent(key)}?user=cam&pass=${encodeURIComponent(publishToken)}`
       : null,
   };
+}
+
+function resolveRecognitionType(direction: "ENTRY" | "EXIT" | "UNKNOWN") {
+  if (direction === "EXIT") return FaceRecognitionType.EXIT;
+  if (direction === "UNKNOWN") return FaceRecognitionType.UNKNOWN;
+  return FaceRecognitionType.ENTRY;
+}
+
+function resolveAttendanceStatus(recognizedAt: Date, openingTime: string, toleranceMinutes: number) {
+  const [hours, minutes] = openingTime.split(":").map((value) => Number(value));
+  const opening = new Date(recognizedAt);
+  opening.setHours(hours, minutes, 0, 0);
+
+  const tolerance = new Date(opening);
+  tolerance.setMinutes(tolerance.getMinutes() + toleranceMinutes);
+
+  return recognizedAt > tolerance ? AttendanceStatus.LATE : AttendanceStatus.PRESENT;
+}
+
+function notificationPayload(params: {
+  studentName: string;
+  schoolName: string;
+  recognizedAt: Date;
+  attendanceStatus: AttendanceStatus;
+  eventType: FaceRecognitionType;
+}) {
+  const time = formatTime(params.recognizedAt);
+  if (params.attendanceStatus === AttendanceStatus.LATE) {
+    return { type: NotificationType.LATE, message: `${params.studentName} chegou atrasado em ${params.schoolName} as ${time}.` };
+  }
+  if (params.eventType === FaceRecognitionType.EXIT) {
+    return { type: NotificationType.EXIT, message: `${params.studentName} saiu de ${params.schoolName} as ${time}.` };
+  }
+  return { type: NotificationType.ENTRY, message: `${params.studentName} entrou em ${params.schoolName} as ${time}.` };
 }
 
 // ─── Geração de código (admin do painel) ────────────────────────────────────
@@ -428,6 +476,345 @@ router.post(
       });
 
     res.status(202).json({ ok: true, cameraId: camera.id, accepted: true });
+  }),
+);
+
+const edgeRecognitionSchema = z.object({
+  eventId: z.string().trim().min(1).max(120),
+  cameraId: z.string().trim().min(1),
+  schoolId: z.string().trim().min(1),
+  identityId: z.string().trim().min(1).nullable().optional(),
+  studentId: z.string().trim().min(1).nullable().optional(),
+  matchStatus: z.nativeEnum(FaceMatchStatus),
+  confidence: z.coerce.number().min(0).max(1),
+  recognizedAt: z.string().datetime(),
+  direction: z.enum(["ENTRY", "EXIT", "UNKNOWN"]).default("ENTRY"),
+  modelName: z.string().trim().min(1).max(80).default("face-api.js"),
+  modelVersion: z.string().trim().max(80).nullable().optional(),
+  distance: z.coerce.number().nullable().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+router.get(
+  "/edge/sync",
+  asyncHandler(async (req, res) => {
+    const ctx = await loadGatewayFromBearer(req);
+    if (!ctx) {
+      res.status(401).json({ error: "Token de gateway invalido" });
+      return;
+    }
+
+    const [gateway, settings, cameras, references] = await Promise.all([
+      prisma.gateway.findUnique({
+        where: { id: ctx.gatewayId },
+        select: { schoolId: true },
+      }),
+      prisma.tenantSettings.findUnique({
+        where: { tenantId: ctx.tenantId },
+        select: { confidenceThreshold: true, framesPerSecond: true },
+      }),
+      prisma.camera.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          status: CameraStatus.ACTIVE,
+          ...(ctx.schoolId ? { schoolId: ctx.schoolId } : {}),
+          runtimeStatus: { is: { gatewayId: ctx.gatewayId } },
+        },
+        select: {
+          id: true,
+          schoolId: true,
+          name: true,
+          location: true,
+          serialNumber: true,
+          recognitionStartTime: true,
+          recognitionEndTime: true,
+        },
+        orderBy: { name: "asc" },
+      }),
+      biometricEngine.listRecognitionReferences(ctx.tenantId),
+    ]);
+
+    const schoolId = gateway?.schoolId ?? ctx.schoolId;
+    res.json({
+      syncedAt: Date.now(),
+      cameras: cameras
+        .filter((camera) => !!camera.serialNumber)
+        .map((camera) => ({
+          id: camera.id,
+          schoolId: camera.schoolId,
+          name: camera.name,
+          location: camera.location,
+          serialNumber: camera.serialNumber!,
+          streamKey: streamKey(camera.serialNumber!),
+          recognitionStartTime: camera.recognitionStartTime,
+          recognitionEndTime: camera.recognitionEndTime,
+        })),
+      references: schoolId ? references.filter((reference) => reference.schoolId === schoolId) : references,
+      settings: {
+        confidenceThreshold: (settings?.confidenceThreshold ?? 60) / 100,
+        framesPerSecond: settings?.framesPerSecond ?? 2,
+      },
+    });
+  }),
+);
+
+router.post(
+  "/edge/recognitions",
+  asyncHandler(async (req, res) => {
+    const ctx = await loadGatewayFromBearer(req);
+    if (!ctx) {
+      res.status(401).json({ error: "Token de gateway invalido" });
+      return;
+    }
+
+    const body = edgeRecognitionSchema.parse(req.body ?? {});
+    const recognizedAt = new Date(body.recognizedAt);
+    if (Number.isNaN(recognizedAt.getTime())) {
+      throw badRequest("Data de reconhecimento invalida");
+    }
+
+    const camera = await prisma.camera.findFirst({
+      where: {
+        id: body.cameraId,
+        tenantId: ctx.tenantId,
+        schoolId: body.schoolId,
+        status: CameraStatus.ACTIVE,
+        runtimeStatus: { is: { gatewayId: ctx.gatewayId } },
+      },
+      include: { school: true },
+    });
+
+    if (!camera) {
+      res.status(404).json({ error: "Camera nao encontrada para este gateway" });
+      return;
+    }
+
+    const eventType =
+      body.matchStatus === FaceMatchStatus.MATCHED ? resolveRecognitionType(body.direction) : FaceRecognitionType.UNKNOWN;
+    const dateKey = localDateKey(recognizedAt);
+    const duplicateWindow = new Date(recognizedAt.getTime() - 180_000);
+
+    const identity = body.identityId
+      ? await prisma.faceIdentity.findFirst({
+          where: { id: body.identityId, tenantId: ctx.tenantId, schoolId: camera.schoolId, isActive: true },
+          include: { student: true },
+        })
+      : body.studentId
+        ? await prisma.faceIdentity.findFirst({
+            where: { tenantId: ctx.tenantId, schoolId: camera.schoolId, studentId: body.studentId, isActive: true },
+            include: { student: true },
+          })
+        : null;
+
+    const matchedStudent = identity?.student ?? null;
+    const effectiveMatchStatus =
+      body.matchStatus === FaceMatchStatus.MATCHED && matchedStudent
+        ? FaceMatchStatus.MATCHED
+        : body.matchStatus === FaceMatchStatus.REVIEW_REQUIRED
+          ? FaceMatchStatus.REVIEW_REQUIRED
+          : FaceMatchStatus.UNMATCHED;
+
+    if (effectiveMatchStatus === FaceMatchStatus.MATCHED && matchedStudent) {
+      const duplicate = await prisma.faceRecognitionEvent.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          cameraId: camera.id,
+          studentId: matchedStudent.id,
+          type: eventType,
+          recognizedAt: { gte: duplicateWindow, lte: recognizedAt },
+        },
+        select: { id: true },
+      });
+      if (duplicate) {
+        res.json({ ok: true, duplicate: true, recognitionEventId: duplicate.id });
+        return;
+      }
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      let attendance = null;
+      let cameraEvent = null;
+      let notification = null;
+
+      if (effectiveMatchStatus === FaceMatchStatus.MATCHED && matchedStudent) {
+        const student = await tx.student.findFirst({
+          where: { id: matchedStudent.id, tenantId: ctx.tenantId, schoolId: camera.schoolId, status: StudentStatus.ACTIVE },
+        });
+        if (!student) throw badRequest("Aluno reconhecido nao esta ativo nesta escola");
+
+        const attendanceStatus =
+          eventType === FaceRecognitionType.EXIT
+            ? AttendanceStatus.LEFT
+            : resolveAttendanceStatus(recognizedAt, camera.school.openingTime, camera.school.toleranceMinutes);
+
+        attendance = await tx.attendance.upsert({
+          where: {
+            tenantId_studentId_date: { tenantId: ctx.tenantId, studentId: student.id, date: dateKey },
+          },
+          create: {
+            tenantId: ctx.tenantId,
+            studentId: student.id,
+            schoolId: camera.schoolId,
+            cameraId: camera.id,
+            date: dateKey,
+            status: attendanceStatus,
+            entryAt: eventType === FaceRecognitionType.EXIT ? null : recognizedAt,
+            exitAt: eventType === FaceRecognitionType.EXIT ? recognizedAt : null,
+            recognized: true,
+            confidence: body.confidence,
+            notified: false,
+            notes: "Reconhecimento local no gateway desktop",
+          },
+          update: {
+            schoolId: camera.schoolId,
+            cameraId: camera.id,
+            status: attendanceStatus,
+            recognized: true,
+            confidence: body.confidence,
+            notified: false,
+            notes: "Reconhecimento local no gateway desktop",
+            ...(eventType === FaceRecognitionType.EXIT ? { exitAt: recognizedAt } : { entryAt: recognizedAt, exitAt: null }),
+          },
+        });
+
+        cameraEvent = await tx.cameraEvent.create({
+          data: {
+            tenantId: ctx.tenantId,
+            schoolId: camera.schoolId,
+            cameraId: camera.id,
+            studentId: student.id,
+            attendanceId: attendance.id,
+            type: eventType === FaceRecognitionType.EXIT ? CameraEventType.EXIT : CameraEventType.ENTRY,
+            recognized: true,
+            confidence: body.confidence,
+            snapshotUrl: null,
+            happenedAt: recognizedAt,
+          },
+        });
+
+        const linkedGuardian = await tx.studentGuardian.findFirst({
+          where: { tenantId: ctx.tenantId, studentId: student.id },
+          orderBy: { createdAt: "asc" },
+          select: { guardianId: true },
+        });
+        const guardianId = student.primaryGuardianId ?? linkedGuardian?.guardianId ?? null;
+        if (guardianId) {
+          const guardian = await tx.guardian.findFirst({
+            where: { id: guardianId, tenantId: ctx.tenantId },
+            select: { id: true, whatsapp: true },
+          });
+          if (guardian) {
+            const payload = notificationPayload({
+              studentName: student.name,
+              schoolName: camera.school.name,
+              recognizedAt,
+              attendanceStatus,
+              eventType,
+            });
+            notification = await tx.notification.create({
+              data: {
+                tenantId: ctx.tenantId,
+                schoolId: camera.schoolId,
+                studentId: student.id,
+                guardianId: guardian.id,
+                attendanceId: attendance.id,
+                type: payload.type,
+                channel: guardian.whatsapp ? NotificationChannel.WHATSAPP : NotificationChannel.PUSH,
+                status: NotificationStatus.PENDING,
+                sentAt: null,
+                message: payload.message,
+              },
+            });
+          }
+        }
+      } else {
+        cameraEvent = await tx.cameraEvent.create({
+          data: {
+            tenantId: ctx.tenantId,
+            schoolId: camera.schoolId,
+            cameraId: camera.id,
+            studentId: matchedStudent?.id ?? body.studentId ?? null,
+            attendanceId: null,
+            type: CameraEventType.UNKNOWN,
+            recognized: false,
+            confidence: body.confidence,
+            snapshotUrl: null,
+            happenedAt: recognizedAt,
+          },
+        });
+      }
+
+      const recognitionEvent = await tx.faceRecognitionEvent.create({
+        data: {
+          tenantId: ctx.tenantId,
+          schoolId: camera.schoolId,
+          cameraId: camera.id,
+          studentId: matchedStudent?.id ?? body.studentId ?? null,
+          identityId: identity?.id ?? body.identityId ?? null,
+          attendanceId: attendance?.id ?? null,
+          type: eventType,
+          matchStatus: effectiveMatchStatus,
+          confidence: body.confidence,
+          reviewReason: effectiveMatchStatus === FaceMatchStatus.REVIEW_REQUIRED ? "Reconhecimento local requer revisao" : null,
+          snapshotPath: null,
+          metadata: {
+            ...(body.metadata ?? {}),
+            eventId: body.eventId,
+            source: "desktop-edge",
+            modelName: body.modelName,
+            modelVersion: body.modelVersion ?? null,
+            distance: body.distance ?? null,
+          } as Prisma.InputJsonValue,
+          dedupeKey:
+            effectiveMatchStatus === FaceMatchStatus.MATCHED && matchedStudent
+              ? `${ctx.tenantId}:${camera.id}:${matchedStudent.id}:${eventType}:${dateKey}`
+              : null,
+          recognizedAt,
+        },
+      });
+
+      await tx.cameraRuntimeStatus.upsert({
+        where: { cameraId: camera.id },
+        create: {
+          tenantId: ctx.tenantId,
+          schoolId: camera.schoolId,
+          cameraId: camera.id,
+          gatewayId: ctx.gatewayId,
+          healthStatus: "ONLINE",
+          lastHeartbeatAt: new Date(),
+          lastFrameAt: recognizedAt,
+          metadata: { edgeRecognition: true },
+        },
+        update: {
+          gatewayId: ctx.gatewayId,
+          healthStatus: "ONLINE",
+          lastHeartbeatAt: new Date(),
+          lastFrameAt: recognizedAt,
+          lastError: null,
+          metadata: { edgeRecognition: true },
+        },
+      });
+
+      return { recognitionEvent, cameraEvent, attendance, notification };
+    });
+
+    await prisma.gateway.update({
+      where: { id: ctx.gatewayId },
+      data: { lastSeenAt: new Date(), status: GatewayStatus.ACTIVE },
+    });
+
+    if (result.attendance) {
+      await refreshStudentPresence(ctx.tenantId, result.attendance.studentId);
+    }
+
+    res.status(201).json({
+      ok: true,
+      duplicate: false,
+      recognitionEventId: result.recognitionEvent.id,
+      cameraEventId: result.cameraEvent?.id ?? null,
+      attendanceId: result.attendance?.id ?? null,
+      notificationId: result.notification?.id ?? null,
+    });
   }),
 );
 

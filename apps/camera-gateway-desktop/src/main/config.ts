@@ -23,6 +23,78 @@ export type DiscoveredCamera = {
   publishUrl?: string;
 };
 
+export type EdgeEmbedding = {
+  id: string;
+  modelName: string;
+  modelVersion?: string | null;
+  vector: number[];
+  qualityScore?: number | null;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type EdgeReference = {
+  id: string;
+  tenantId: string;
+  studentId: string;
+  schoolId: string;
+  label: string;
+  isActive: boolean;
+  student: {
+    id: string;
+    nome: string;
+    escolaId: string;
+    foto: string;
+    ativo: boolean;
+    biometriaAtiva: boolean;
+  } | null;
+  school: {
+    id: string;
+    nome: string;
+  } | null;
+  embeddings: EdgeEmbedding[];
+  totalEmbeddings: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EdgeCamera = {
+  id: string;
+  schoolId: string;
+  name: string;
+  location: string;
+  serialNumber: string;
+  streamKey: string;
+  recognitionStartTime?: string | null;
+  recognitionEndTime?: string | null;
+};
+
+export type EdgeSyncState = {
+  syncedAt?: number;
+  cameras: EdgeCamera[];
+  references: EdgeReference[];
+  settings: {
+    confidenceThreshold: number;
+    framesPerSecond: number;
+  };
+};
+
+export type PendingEdgeRecognitionEvent = {
+  eventId: string;
+  cameraId: string;
+  schoolId: string;
+  identityId?: string | null;
+  studentId?: string | null;
+  matchStatus: "MATCHED" | "REVIEW_REQUIRED" | "UNMATCHED";
+  confidence: number;
+  recognizedAt: string;
+  direction: "ENTRY" | "EXIT" | "UNKNOWN";
+  modelName: string;
+  modelVersion?: string | null;
+  distance?: number | null;
+  metadata?: Record<string, unknown>;
+};
+
 export type GatewayConfig = {
   apiBaseUrl: string;
   gatewayId?: string;
@@ -33,6 +105,9 @@ export type GatewayConfig = {
   lastDiscoveredCameras: DiscoveredCamera[];
   lastSyncAt?: number;
   cameraCredentials: Record<string, { user: string; pass: string }>;
+  remoteRelayEnabled: boolean;
+  edge: EdgeSyncState;
+  pendingEdgeRecognitionEvents: PendingEdgeRecognitionEvent[];
 };
 
 export const config = new Store<GatewayConfig>({
@@ -40,6 +115,16 @@ export const config = new Store<GatewayConfig>({
     apiBaseUrl: "https://vigiaescolar.com.br/api",
     lastDiscoveredCameras: [],
     cameraCredentials: {},
+    remoteRelayEnabled: false,
+    edge: {
+      cameras: [],
+      references: [],
+      settings: {
+        confidenceThreshold: 0.6,
+        framesPerSecond: 2,
+      },
+    },
+    pendingEdgeRecognitionEvents: [],
   },
 });
 

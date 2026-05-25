@@ -16,8 +16,16 @@ import { fileURLToPath } from "node:url";
 import { autoUpdater } from "electron-updater";
 import { config, saveConfig } from "./config";
 import { runDiscoveryLoop, stopDiscovery } from "./lanDiscovery";
-import { runStreamRelay, stopStreamRelay } from "./streamRelay";
+import { localHlsUrl, runStreamRelay, stopStreamRelay } from "./streamRelay";
 import { pairWithServer } from "./pairing";
+import {
+  edgeSyncState,
+  flushPendingEdgeRecognitionEvents,
+  runEdgeSyncLoop,
+  stopEdgeSyncLoop,
+  submitEdgeRecognitionEvent,
+  syncEdgeData,
+} from "./edgeSync";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -168,8 +176,13 @@ ipcMain.handle("config:get", () => {
     gatewayName: c.gatewayName,
     schoolName: c.schoolName,
     apiBaseUrl: c.apiBaseUrl,
-    lastDiscoveredCameras: c.lastDiscoveredCameras ?? [],
+    lastDiscoveredCameras: (c.lastDiscoveredCameras ?? []).map((camera) => ({
+      ...camera,
+      localLiveUrl: localHlsUrl(camera),
+    })),
     lastSyncAt: c.lastSyncAt,
+    edge: config.get("edge"),
+    pendingEdgeEvents: config.get("pendingEdgeRecognitionEvents")?.length ?? 0,
     update: updateStatus,
   };
 });
@@ -181,6 +194,7 @@ ipcMain.handle("pair", async (_evt, code: string) => {
     // Inicia descoberta imediatamente após pareamento
     runDiscoveryLoop({ immediate: true });
     runStreamRelay();
+    runEdgeSyncLoop();
     return { ok: true, ...result };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? "Erro desconhecido" };
@@ -190,12 +204,22 @@ ipcMain.handle("pair", async (_evt, code: string) => {
 ipcMain.handle("unpair", () => {
   stopDiscovery();
   stopStreamRelay();
+  stopEdgeSyncLoop();
   saveConfig({
     gatewayToken: undefined,
     gatewayId: undefined,
     gatewayName: undefined,
     schoolName: undefined,
     lastDiscoveredCameras: [],
+    edge: {
+      cameras: [],
+      references: [],
+      settings: {
+        confidenceThreshold: 0.6,
+        framesPerSecond: 2,
+      },
+    },
+    pendingEdgeRecognitionEvents: [],
   });
   rebuildTrayMenu();
   return { ok: true };
@@ -203,7 +227,25 @@ ipcMain.handle("unpair", () => {
 
 ipcMain.handle("discover-now", () => {
   runDiscoveryLoop({ immediate: true });
+  void syncEdgeData();
   return { ok: true };
+});
+
+ipcMain.handle("edge:sync", async () => {
+  const state = await syncEdgeData();
+  mainWindow?.webContents.send("status:changed");
+  return { ok: true, state };
+});
+
+ipcMain.handle("edge:get", () => ({
+  state: edgeSyncState(),
+  pendingEvents: config.get("pendingEdgeRecognitionEvents")?.length ?? 0,
+}));
+
+ipcMain.handle("edge:recognition", async (_evt, payload) => {
+  const result = await submitEdgeRecognitionEvent(payload);
+  void flushPendingEdgeRecognitionEvents();
+  return result;
 });
 
 ipcMain.handle("updates:check", async () => {
@@ -302,6 +344,7 @@ if (!gotLock) {
     if (config.get("gatewayToken")) {
       runDiscoveryLoop({ immediate: true });
       runStreamRelay();
+      runEdgeSyncLoop();
     }
   });
 
@@ -309,6 +352,7 @@ if (!gotLock) {
     isQuitting = true;
     stopDiscovery();
     stopStreamRelay();
+    stopEdgeSyncLoop();
     if (updateTimer) clearInterval(updateTimer);
   });
 }

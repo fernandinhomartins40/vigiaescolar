@@ -40,6 +40,15 @@ input[type="text"] {
 }
 input[type="text"]:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
 
+select {
+  flex: 1;
+  padding: 12px 14px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
 button {
   padding: 12px 20px; font-size: 14px; font-weight: 600;
   border: none; border-radius: 8px; cursor: pointer;
@@ -74,6 +83,29 @@ button {
 .kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 12px; }
 .kv .k { color: var(--muted); }
 .kv .v { font-family: ui-monospace, monospace; }
+
+.edge-card { overflow: hidden; }
+.edge-toolbar { align-items: center; margin-bottom: 12px; }
+.edge-video-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #020617;
+  border: 1px solid var(--border);
+}
+.edge-video,
+.edge-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.edge-video { object-fit: contain; }
+.edge-overlay { pointer-events: none; }
+.edge-message { margin-top: 10px; margin-bottom: 8px; }
+.edge-matches { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .app-meta {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;

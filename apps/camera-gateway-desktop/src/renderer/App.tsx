@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import type { GatewayStatus } from "../shared/types";
+import { EdgeRecognition } from "./EdgeRecognition";
 
 export function App() {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
@@ -53,6 +54,12 @@ export function App() {
     await window.gateway.discoverNow();
     setOkMsg("Procurando câmeras na rede local...");
     setTimeout(refresh, 4000);
+  }
+
+  async function handleEdgeSync() {
+    await window.gateway.syncEdge();
+    setOkMsg("Dados biométricos sincronizados para reconhecimento local.");
+    await refresh();
   }
 
   async function handleCheckUpdates() {
@@ -132,10 +139,13 @@ export function App() {
               Câmeras detectadas ({status.lastDiscoveredCameras.length}){" "}
               <span className="status-badge online">conectado</span>
             </h2>
-            <p>O gateway varre a rede local a cada 5 minutos e transmite vídeo ao vivo continuamente para o servidor.</p>
+            <p>O gateway varre a rede local a cada 5 minutos. O vídeo e o reconhecimento rodam neste PC; a VPS recebe apenas eventos.</p>
             <div className="row" style={{ marginBottom: 16 }}>
               <button className="btn-secondary" onClick={handleDiscover}>
                 Procurar agora
+              </button>
+              <button className="btn-secondary" onClick={handleEdgeSync}>
+                Sincronizar faces
               </button>
               <button className="btn-danger" onClick={handleUnpair}>
                 Desparear
@@ -156,13 +166,15 @@ export function App() {
                       {cam.ip} · SN: {cam.serialNumber.substring(0, 16) || "—"} · {cam.hardware}
                     </div>
                   </div>
-                  <span className={`status-badge ${cam.publishUrl ? "online" : "offline"}`}>
-                    {cam.publishUrl ? "relay configurado" : "aguardando servidor"}
+                  <span className={`status-badge ${cam.localLiveUrl ? "online" : "offline"}`}>
+                    {cam.localLiveUrl ? "local edge" : "aguardando"}
                   </span>
                 </div>
               ))
             )}
           </div>
+
+          <EdgeRecognition cameras={status.lastDiscoveredCameras} edge={status.edge} />
         </>
       )}
 
@@ -172,7 +184,7 @@ export function App() {
         <div>
           <h2>Aplicativo</h2>
           <p>
-            Versão {status.appVersion} · {status.update.message}
+            Versão {status.appVersion} · {status.update.message} · Eventos pendentes: {status.pendingEdgeEvents}
           </p>
         </div>
         <button

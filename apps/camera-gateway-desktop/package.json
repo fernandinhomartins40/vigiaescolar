@@ -1,6 +1,6 @@
 {
   "name": "@vigiaescolar/camera-gateway-desktop",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "author": "VigiaEscolar",
   "description": "Gateway desktop VigiaEscolar — roda no PC da escola e faz relay das câmeras locais para a VPS.",
@@ -29,8 +29,11 @@
     "vite": "^5.4.11"
   },
   "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
     "electron-store": "^10.0.0",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "face-api.js": "^0.22.2",
+    "hls.js": "^1.6.16"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -1,114 +1,71 @@
-# Deploy do Gateway Desktop na VPS
+# Deploy do VigiaEscolar Edge Desktop
 
-Este guia descreve como publicar o instalador do gateway e habilitar o relay de vídeo ao vivo `DVRIP -> RTMPS -> MediaMTX`.
+O desktop agora e um app de processamento local. A VPS nao precisa receber video continuo; ela serve cadastro/sincronizacao e recebe eventos reconhecidos.
 
-## 1. Build na máquina Windows
+## Fluxo atual
+
+```text
+Camera XM -> DVRIP -> PC da escola
+                     -> go2rtc local -> HLS local no Electron
+                     -> face-api.js local
+                     -> POST /api/gateways/edge/recognitions
+```
+
+## Build do instalador
 
 ```bash
 npm install
 npm run gateway:installer
 ```
 
-Saída em `apps/camera-gateway-desktop/release/`:
+Saida em `apps/camera-gateway-desktop/release/`:
 
-- `VigiaEscolar-Gateway-Setup-X.Y.Z.exe` — instalador NSIS
-- `VigiaEscolar-Gateway-Setup.exe` — cópia estável usada pelo botão do painel
-- `latest.yml` — manifesto para auto-update
-- `*.blockmap` — diff blocks para download incremental
+- `VigiaEscolar-Gateway-Setup-X.Y.Z.exe`
+- `VigiaEscolar-Gateway-Setup.exe`
+- `latest.yml`
+- `*.blockmap`
 
-O build baixa e incorpora `go2rtc.exe` v1.9.14, que lê as câmeras XM pela porta DVRIP 34567 e publica o vídeo continuamente para a VPS. Também inclui FFmpeg como fallback: se a câmera fornecer apenas H265, o PC converte o fluxo para H264, codec exigido pela publicação RTMPS. Alterações em `apps/camera-gateway-desktop/` enviadas para `main` acionam `.github/workflows/gateway-installer.yml`, que faz esse build em Windows e publica os arquivos abaixo na VPS automaticamente.
+O workflow `.github/workflows/gateway-installer.yml` compila em Windows e publica automaticamente em:
 
-## 2. Variáveis da VPS
-
-No `.env` usado pelo compose, defina:
-
-```bash
-CAMERA_PUBLISH_TOKEN=<token-aleatorio-longo>
-MEDIA_INGEST_SCHEME=rtmps
-MEDIA_INGEST_HOST=vigiaescolar.com.br
-MEDIA_INGEST_PORT=1936
+```text
+https://vigiaescolar.com.br/downloads/gateway/
 ```
 
-O deploy gera `CAMERA_PUBLISH_TOKEN` automaticamente quando ele ainda não existe. O `docker-compose.prod.yml` inicia o MediaMTX com RTMPS usando o certificado Let's Encrypt existente, entrega HLS somente através da API autenticada e configura o processador facial para ler o RTSP interno.
+## VPS
 
-## 3. Upload manual do instalador (fallback)
+A VPS deve manter:
 
-```bash
-# Substitua a versão pela atual
-VERSION=0.1.1
-RELEASE_DIR=apps/camera-gateway-desktop/release
+- API publica em `https://vigiaescolar.com.br/api`
+- download estatico em `/downloads/gateway/`
+- banco com tabelas `Gateway`, `GatewayPairingCode`, `CameraRuntimeStatus`, biometria e presenca
 
-# Copia para a VPS (servida pelo nginx central):
-scp $RELEASE_DIR/VigiaEscolar-Gateway-Setup-$VERSION.exe \
-    $RELEASE_DIR/VigiaEscolar-Gateway-Setup.exe \
-    $RELEASE_DIR/latest.yml \
-    $RELEASE_DIR/*.blockmap \
-    root@vigiaescolar.com.br:/var/www/vigiaescolar-static/downloads/gateway/
+O MediaMTX pode continuar no compose por compatibilidade e relay remoto futuro, mas o modo edge local nao depende de transmissao RTMPS continua.
 
-```
+## Endpoints novos
 
-## 4. Configuração do nginx para downloads (uma vez)
+| Metodo | Path | Auth | Uso |
+|---|---|---|---|
+| GET | `/api/gateways/edge/sync` | Bearer gateway | Desktop baixa cameras, embeddings e configuracoes |
+| POST | `/api/gateways/edge/recognitions` | Bearer gateway | Desktop envia evento reconhecido localmente |
 
-Adicionar ao bloco `server { server_name vigiaescolar.com.br; ... }` em `/etc/nginx/sites-enabled/vigiaescolar` na VPS:
-
-```nginx
-location /downloads/ {
-    alias /var/www/vigiaescolar-static/downloads/;
-    autoindex on;
-    autoindex_format html;
-
-    # Permite resume e Range requests (electron-updater usa isso)
-    add_header Accept-Ranges bytes;
-
-    # CORS pra renderer pegar latest.yml
-    add_header Access-Control-Allow-Origin "*";
-
-    # Cache curto pra latest.yml, longo pra .exe
-    location ~ \.yml$  { add_header Cache-Control "no-cache"; }
-    location ~ \.exe$  { add_header Cache-Control "public, max-age=3600"; }
-}
-```
-
-Depois:
+## Verificacao
 
 ```bash
-nginx -t && systemctl reload nginx
-mkdir -p /var/www/vigiaescolar-static/downloads/gateway
-chown -R www-data:www-data /var/www/vigiaescolar-static/downloads
-```
-
-## 5. Verificação
-
-```bash
-curl -I https://vigiaescolar.com.br/downloads/gateway/VigiaEscolar-Gateway-Setup-0.1.1.exe
-# 200 OK + Content-Length
-
-curl -I https://vigiaescolar.com.br/downloads/gateway/VigiaEscolar-Gateway-Setup.exe
-# 200 OK; este é o link usado pelo painel
-
 curl https://vigiaescolar.com.br/downloads/gateway/latest.yml
-# version: 0.1.1
-# files: ...
+# version: 0.2.0
 
-# Depois de parear e descobrir a câmera, o painel deve reproduzir:
-# /api/cameras/<camera-id>/live/index.m3u8 (rota exige sessão web)
+curl https://vigiaescolar.com.br/api/health
+# {"status":"ok",...}
 ```
 
-## 6. Página HTML de download (opcional)
+No painel `Gateways`, o app atualizado deve reportar `appVersion = 0.2.0`.
 
-Pra usuário leigo, o painel já tem botão "Baixar instalador" apontando direto pro `.exe`. Mas se quiser uma página bonita, criar `/var/www/vigiaescolar-static/downloads/gateway/index.html` com instruções.
+## Operacao na escola
 
-## Fluxo de vídeo
+1. Instalar `VigiaEscolar-Gateway-Setup.exe`.
+2. Parear com codigo do painel.
+3. Clicar em `Procurar cameras agora`.
+4. Clicar em `Sincronizar faces`.
+5. Iniciar o reconhecimento local no app desktop.
 
-1. O app desktop encontra a câmera XM por DVRIP e a API cria o cadastro vinculado à escola.
-2. O `go2rtc` incluído no instalador abre o stream DVRIP contínuo e publica RTMPS em `live/<SerialNumber>`.
-3. O MediaMTX expõe o mesmo fluxo como RTSP interno para reconhecimento e HLS para a API.
-4. A aba **Vídeo ao Vivo** do painel carrega HLS e o processamento facial analisa frames decodificados do stream.
-
-O MediaMTX marca a câmera online somente depois que a publicação RTMPS existe; o processador facial não abre caminhos RTSP ainda ausentes.
-
-## Auto-update funcionamento
-
-Quando o gateway desktop inicia, e depois a cada seis horas, ele lê `https://vigiaescolar.com.br/downloads/gateway/latest.yml` e compara com a versão local. Se houver versão maior, baixa silenciosamente o novo `.exe`, e na próxima reinicialização aplica.
-
-Para forçar update imediato sem esperar restart do user, podemos no futuro adicionar um endpoint `POST /api/gateways/force-update` que o gateway lê via heartbeat — mas por enquanto o ciclo natural é suficiente.
+Eventos reconhecidos entram na fila local se a internet cair e sao reenviados quando a conexao voltar.

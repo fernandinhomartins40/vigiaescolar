@@ -1,11 +1,15 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { GatewayStatus, PairResponse } from "../shared/types";
+import type { EdgeRecognitionEventDTO, EdgeSyncStateDTO, GatewayStatus, PairResponse } from "../shared/types";
 
 contextBridge.exposeInMainWorld("gateway", {
   getStatus: (): Promise<GatewayStatus> => ipcRenderer.invoke("config:get"),
   pair: (code: string): Promise<PairResponse> => ipcRenderer.invoke("pair", code),
   unpair: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("unpair"),
   discoverNow: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("discover-now"),
+  syncEdge: (): Promise<{ ok: boolean; state: EdgeSyncStateDTO }> => ipcRenderer.invoke("edge:sync"),
+  getEdge: (): Promise<{ state: EdgeSyncStateDTO; pendingEvents: number }> => ipcRenderer.invoke("edge:get"),
+  submitEdgeRecognition: (payload: EdgeRecognitionEventDTO): Promise<{ ok: boolean; queued?: boolean }> =>
+    ipcRenderer.invoke("edge:recognition", payload),
   checkForUpdates: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:check"),
   onStatusChanged: (callback: () => void): (() => void) => {
     const listener = () => callback();
@@ -21,6 +25,9 @@ declare global {
       pair: (code: string) => Promise<PairResponse>;
       unpair: () => Promise<{ ok: boolean }>;
       discoverNow: () => Promise<{ ok: boolean }>;
+      syncEdge: () => Promise<{ ok: boolean; state: EdgeSyncStateDTO }>;
+      getEdge: () => Promise<{ state: EdgeSyncStateDTO; pendingEvents: number }>;
+      submitEdgeRecognition: (payload: EdgeRecognitionEventDTO) => Promise<{ ok: boolean; queued?: boolean }>;
       checkForUpdates: () => Promise<{ ok: boolean }>;
       onStatusChanged: (callback: () => void) => () => void;
     };

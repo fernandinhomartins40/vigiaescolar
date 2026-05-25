@@ -26,9 +26,7 @@ let restartTimer: NodeJS.Timeout | null = null;
 let stopping = false;
 
 function relayCameras() {
-  return (config.get("lastDiscoveredCameras") ?? []).filter(
-    (camera): camera is DiscoveredCamera & { publishUrl: string } => !!camera.publishUrl,
-  );
+  return (config.get("lastDiscoveredCameras") ?? []).filter((camera) => !!(camera.streamKey || camera.serialNumber));
 }
 
 function binaryPath() {
@@ -51,8 +49,13 @@ function localConfigPath() {
   return join(app.getPath("userData"), "go2rtc.json");
 }
 
-function safeKey(camera: DiscoveredCamera) {
+export function safeKey(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">) {
   return (camera.streamKey || camera.serialNumber).replace(/[^A-Za-z0-9_-]/g, "");
+}
+
+export function localHlsUrl(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">) {
+  const key = `live_${safeKey(camera)}`;
+  return `http://127.0.0.1:1984/api/stream.m3u8?src=${encodeURIComponent(key)}`;
 }
 
 function dvripUrl(camera: DiscoveredCamera) {
@@ -62,10 +65,11 @@ function dvripUrl(camera: DiscoveredCamera) {
   return `dvrip://${user}:${pass}@${camera.ip}:34567?channel=0&subtype=0`;
 }
 
-function createGo2rtcConfig(cameras: Array<DiscoveredCamera & { publishUrl: string }>) {
+function createGo2rtcConfig(cameras: DiscoveredCamera[]) {
   const streams: Record<string, string[]> = {};
   const publish: Record<string, string[]> = {};
   const preload: Record<string, string> = {};
+  const remoteRelayEnabled = config.get("remoteRelayEnabled");
 
   for (const camera of cameras) {
     const key = `live_${safeKey(camera)}`;
@@ -75,17 +79,19 @@ function createGo2rtcConfig(cameras: Array<DiscoveredCamera & { publishUrl: stri
       dvripUrl(camera),
       `ffmpeg:${key}#video=h264`,
     ];
-    publish[key] = [camera.publishUrl];
+    if (remoteRelayEnabled && camera.publishUrl) {
+      publish[key] = [camera.publishUrl];
+    }
     preload[key] = "video=h264";
   }
 
   return {
-    api: { listen: "127.0.0.1:1984" },
+    api: { listen: "127.0.0.1:1984", origin: "*" },
     rtsp: { listen: "127.0.0.1:8554" },
     webrtc: { listen: "" },
     ffmpeg: { bin: ffmpegPath() },
     streams,
-    publish,
+    ...(Object.keys(publish).length ? { publish } : {}),
     preload,
   };
 }

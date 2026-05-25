@@ -14,6 +14,7 @@ import { config, saveConfig, type DiscoveredCamera } from "./config";
 import { dvripGetSystemInfo } from "./dvrip";
 import { apiRequest } from "./pairing";
 import { syncStreamRelays } from "./streamRelay";
+import { syncEdgeData } from "./edgeSync";
 
 const DVRIP_PORT = 34567;
 const TCP_TIMEOUT_MS = 500;
@@ -121,6 +122,7 @@ async function runScanOnce(): Promise<DiscoveredCamera[]> {
     });
     saveConfig({ lastDiscoveredCameras: registered, lastSyncAt: Date.now() });
     syncStreamRelays();
+    void syncEdgeData();
 
     return registered;
   } finally {
