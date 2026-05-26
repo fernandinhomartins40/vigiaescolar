@@ -9,7 +9,7 @@ import { app } from "electron";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, type DiscoveredCamera } from "./config";
@@ -48,20 +48,43 @@ function relayCameras() {
   return (config.get("lastDiscoveredCameras") ?? []).filter((camera) => !!(camera.streamKey || camera.serialNumber));
 }
 
+// go2rtc quebra caminhos com espaços (ex: "C:\Program Files\...") ao invocar ffmpeg.
+// Copiamos os binários para userData (normalmente sem espaços) em tempo de execução.
+function toolsCacheDir() {
+  return join(app.getPath("userData"), "tools");
+}
+
 function binaryPath() {
   if (app.isPackaged) {
-    return join(process.resourcesPath, "tools", "go2rtc.exe");
+    return join(toolsCacheDir(), "go2rtc.exe");
   }
-
   return join(__dirname, "..", "..", "vendor", "go2rtc", "go2rtc.exe");
 }
 
 function ffmpegPath() {
   if (app.isPackaged) {
-    return join(process.resourcesPath, "tools", "ffmpeg.exe");
+    return join(toolsCacheDir(), "ffmpeg.exe");
   }
-  // Em dev, usa o ffmpeg oficial baixado pelo script download-ffmpeg.mjs
   return join(__dirname, "..", "..", "vendor", "ffmpeg", "ffmpeg.exe");
+}
+
+async function ensureToolsCache() {
+  if (!app.isPackaged) return;
+  const cacheDir = toolsCacheDir();
+  await mkdir(cacheDir, { recursive: true });
+  const srcDir = join(process.resourcesPath, "tools");
+  for (const name of ["go2rtc.exe", "ffmpeg.exe"]) {
+    const src = join(srcDir, name);
+    const dst = join(cacheDir, name);
+    if (!fs.existsSync(src)) continue;
+    // Só copia se não existe ou tamanho diferente (evita cópia a cada boot)
+    const srcStat = fs.statSync(src);
+    const dstStat = fs.existsSync(dst) ? fs.statSync(dst) : null;
+    if (!dstStat || dstStat.size !== srcStat.size) {
+      await copyFile(src, dst);
+      appendLog("info", `ferramenta copiada para cache sem espaços: ${name}`);
+    }
+  }
 }
 
 function localConfigPath() {
@@ -147,13 +170,17 @@ async function launchRelay() {
     return;
   }
 
+  await ensureToolsCache();
+
   const executable = binaryPath();
   if (!fs.existsSync(executable)) {
-    console.error(`[stream] go2rtc nao encontrado em ${executable}. Reinstale o gateway atualizado.`);
+    appendLog("error", `go2rtc nao encontrado em ${executable}. Reinstale o gateway.`);
     return;
   }
   if (!fs.existsSync(ffmpegPath())) {
-    console.warn("[stream] FFmpeg nao encontrado; cameras H265 nao poderao ser publicadas.");
+    appendLog("warn", `FFmpeg nao encontrado em ${ffmpegPath()}; cameras H265 nao poderao ser transcodificadas.`);
+  } else {
+    appendLog("info", `FFmpeg: ${ffmpegPath()}`);
   }
 
   const go2rtcConfig = createGo2rtcConfig(cameras);
