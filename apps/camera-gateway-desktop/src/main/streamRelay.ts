@@ -97,17 +97,22 @@ export function safeKey(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumb
 
 export function localHlsUrl(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">) {
   const key = `live_${safeKey(camera)}`;
-  // go2rtc v1.9+: endpoint HLS correto é /stream.m3u8 (não /api/stream.m3u8)
-  return `${GO2RTC_API}/stream.m3u8?src=${encodeURIComponent(key)}`;
+  // go2rtc v1.9: HLS endpoint via API REST (aceita src= como nome do stream)
+  return `${GO2RTC_API}/api/stream.m3u8?src=${encodeURIComponent(key)}`;
 }
 
 export async function probeStreamReady(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">): Promise<boolean> {
   const key = `live_${safeKey(camera)}`;
   try {
+    // Verifica se o stream já tem producers ativos (câmera conectada)
     const res = await fetch(`${GO2RTC_API}/api/streams`);
     if (!res.ok) return false;
-    const data = await res.json() as Record<string, unknown>;
-    return key in data;
+    const data = await res.json() as Record<string, { producers?: { state?: string }[] }>;
+    const stream = data[key];
+    if (!stream) return false;
+    // "pronto" apenas quando há pelo menos um producer com state != "error"
+    const producers = stream.producers ?? [];
+    return producers.length > 0;
   } catch {
     return false;
   }
@@ -123,18 +128,20 @@ function dvripUrl(camera: DiscoveredCamera) {
 function createGo2rtcConfig(cameras: DiscoveredCamera[]) {
   const streams: Record<string, string[]> = {};
   const publish: Record<string, string[]> = {};
-  const preload: Record<string, string> = {};
+  // preload: força go2rtc a conectar na câmera imediatamente (sem esperar consumer)
+  const preload: Record<string, string[]> = {};
   const remoteRelayEnabled = config.get("remoteRelayEnabled");
 
   for (const camera of cameras) {
     const key = `live_${safeKey(camera)}`;
     // Fluxo primário: DVRIP direto.
-    // Fallback ffmpeg: transcodifica para H.264 se câmera usar H.265 (codec 82).
-    // HLS só suporta H.264/H.265 com fMP4; usamos H.264 para máxima compatibilidade.
+    // Fallback ffmpeg: transcodifica H.265→H.264 quando câmera usa codec 82.
     streams[key] = [
       dvripUrl(camera),
       `ffmpeg:${key}#video=h264#audio=aac`,
     ];
+    // Preload garante que a câmera já está conectada quando o HLS.js pedir o M3U8
+    preload[key] = [];
     if (remoteRelayEnabled && camera.publishUrl) {
       publish[key] = [camera.publishUrl];
     }
@@ -143,10 +150,10 @@ function createGo2rtcConfig(cameras: DiscoveredCamera[]) {
   return {
     api: { listen: "127.0.0.1:1984", origin: "*" },
     rtsp: { listen: "127.0.0.1:8554" },
-    webrtc: { listen: "" },
-    hls: { listen: "" },
+    // HLS habilitado sem porta dedicada — servido via API REST (/api/stream.m3u8)
     ffmpeg: { bin: ffmpegPath() },
     streams,
+    preload,
     ...(Object.keys(publish).length ? { publish } : {}),
   };
 }

@@ -237,25 +237,38 @@ export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDT
     async function startStream() {
       if (!video) return;
 
-      // Aguarda o go2rtc registrar o stream antes de tentar HLS
-      // (evita manifestParsingError — go2rtc retorna JSON de erro enquanto conecta)
+      // Sonda o M3U8 diretamente até retornar conteúdo HLS válido.
+      // go2rtc retorna JSON de erro enquanto conecta na câmera — aguardamos até
+      // receber "#EXTM3U" no body, o que confirma que há segmentos disponíveis.
       setMessage("Aguardando go2rtc conectar na câmera...");
-      const MAX_PROBE_ATTEMPTS = 15;
+      const MAX_PROBE_MS = 45_000;
       const PROBE_INTERVAL_MS = 2000;
-      for (let attempt = 0; attempt < MAX_PROBE_ATTEMPTS; attempt++) {
+      const deadline = Date.now() + MAX_PROBE_MS;
+      let attempt = 0;
+
+      while (Date.now() < deadline) {
         if (cancelled) return;
-        const { ready } = await window.gateway.probeStream(serial!, streamKey);
-        if (ready) break;
-        if (attempt === MAX_PROBE_ATTEMPTS - 1) {
-          setMessage("go2rtc não conseguiu conectar na câmera. Verifique IP e credenciais DVRIP.");
-          setStreamError("Câmera DVRIP não respondeu após 30s");
-          return;
+        attempt++;
+        try {
+          const res = await fetch(url!);
+          if (res.ok) {
+            const text = await res.text();
+            if (text.trimStart().startsWith("#EXTM3U")) break; // M3U8 válido
+          }
+        } catch {
+          // go2rtc ainda não respondeu
         }
-        setMessage(`Aguardando câmera... (${attempt + 1}/${MAX_PROBE_ATTEMPTS})`);
+        setMessage(`Aguardando câmera conectar... (${attempt})`);
         await new Promise((r) => setTimeout(r, PROBE_INTERVAL_MS));
       }
 
-      if (cancelled || !video) return;
+      if (cancelled) return;
+      if (Date.now() >= deadline) {
+        setStreamError("Câmera não respondeu em 45s. Verifique IP e credenciais DVRIP.");
+        setMessage("Falha ao conectar na câmera.");
+        return;
+      }
+
       setMessage("Conectando ao stream HLS...");
 
       const hls = attachHls(video, url!);
