@@ -19,8 +19,6 @@ files:
 extraResources:
   - from: vendor/go2rtc/go2rtc.exe
     to: tools/go2rtc.exe
-  - from: vendor/ffmpeg/ffmpeg.exe
-    to: tools/ffmpeg.exe
 
 # Auto-update vai buscar updates em https://vigiaescolar.com.br/downloads/
 publish:

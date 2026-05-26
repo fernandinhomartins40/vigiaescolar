@@ -1,9 +1,9 @@
 /**
- * Relay continuo de video das cameras XM.
+ * Relay de vídeo ao vivo via go2rtc.
  *
- * go2rtc implementa o protocolo privado DVRIP/XMEye e publica o stream
- * continuamente por RTMPS para o MediaMTX na VPS. O backend e o navegador
- * passam a consumir o mesmo video ao vivo (RTSP/HLS), sem uploads de JPEG.
+ * Câmeras XM com H.265 no stream principal (subtype=0) sempre têm substream
+ * H.264 (subtype=1) — resolução menor (~640x360) mas sem FFmpeg.
+ * go2rtc serve HLS via /api/stream.m3u8 sem dependência de transcodificação.
  */
 import { app } from "electron";
 import { spawn } from "node:child_process";
@@ -35,61 +35,51 @@ export function appendLog(level: LogLevel, msg: string) {
   const entry: LogEntry = { ts: Date.now(), level, msg };
   logBuffer.push(entry);
   if (logBuffer.length > MAX_LOG) logBuffer.shift();
-  if (level === "error") console.error(`[stream] ${msg}`);
-  else if (level === "warn") console.warn(`[stream] ${msg}`);
-  else console.log(`[stream] ${msg}`);
+  if (level === "error") console.error(`[relay] ${msg}`);
+  else if (level === "warn") console.warn(`[relay] ${msg}`);
+  else console.log(`[relay] ${msg}`);
 }
 
 export function getLogs(): LogEntry[] {
   return [...logBuffer];
 }
 
-function relayCameras() {
-  return (config.get("lastDiscoveredCameras") ?? []).filter((camera) => !!(camera.streamKey || camera.serialNumber));
-}
+// ── Paths ────────────────────────────────────────────────────────────────────
 
-// go2rtc quebra caminhos com espaços (ex: "C:\Program Files\...") ao invocar ffmpeg.
-// Copiamos os binários para userData (normalmente sem espaços) em tempo de execução.
 function toolsCacheDir() {
+  // userData nunca tem espaços (ex: C:\Users\user\AppData\Roaming\...)
+  // go2rtc quebra caminhos com espaços ao invocar FFmpeg
   return join(app.getPath("userData"), "tools");
 }
 
 function binaryPath() {
-  if (app.isPackaged) {
-    return join(toolsCacheDir(), "go2rtc.exe");
-  }
+  if (app.isPackaged) return join(toolsCacheDir(), "go2rtc.exe");
   return join(__dirname, "..", "..", "vendor", "go2rtc", "go2rtc.exe");
-}
-
-function ffmpegPath() {
-  if (app.isPackaged) {
-    return join(toolsCacheDir(), "ffmpeg.exe");
-  }
-  return join(__dirname, "..", "..", "vendor", "ffmpeg", "ffmpeg.exe");
-}
-
-async function ensureToolsCache() {
-  if (!app.isPackaged) return;
-  const cacheDir = toolsCacheDir();
-  await mkdir(cacheDir, { recursive: true });
-  const srcDir = join(process.resourcesPath, "tools");
-  for (const name of ["go2rtc.exe", "ffmpeg.exe"]) {
-    const src = join(srcDir, name);
-    const dst = join(cacheDir, name);
-    if (!fs.existsSync(src)) continue;
-    // Só copia se não existe ou tamanho diferente (evita cópia a cada boot)
-    const srcStat = fs.statSync(src);
-    const dstStat = fs.existsSync(dst) ? fs.statSync(dst) : null;
-    if (!dstStat || dstStat.size !== srcStat.size) {
-      await copyFile(src, dst);
-      appendLog("info", `ferramenta copiada para cache sem espaços: ${name}`);
-    }
-  }
 }
 
 function localConfigPath() {
   return join(app.getPath("userData"), "go2rtc.json");
 }
+
+export async function ensureToolsCache() {
+  if (!app.isPackaged) return;
+  const cacheDir = toolsCacheDir();
+  await mkdir(cacheDir, { recursive: true });
+  const srcDir = join(process.resourcesPath, "tools");
+  for (const name of ["go2rtc.exe"]) {
+    const src = join(srcDir, name);
+    const dst = join(cacheDir, name);
+    if (!fs.existsSync(src)) continue;
+    const srcSize = fs.statSync(src).size;
+    const dstSize = fs.existsSync(dst) ? fs.statSync(dst).size : -1;
+    if (srcSize !== dstSize) {
+      await copyFile(src, dst);
+      appendLog("info", `copiado ${name} para cache (sem espaços no path)`);
+    }
+  }
+}
+
+// ── Configuração go2rtc ──────────────────────────────────────────────────────
 
 export function safeKey(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">) {
   return (camera.streamKey || camera.serialNumber).replace(/[^A-Za-z0-9_-]/g, "");
@@ -97,69 +87,48 @@ export function safeKey(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumb
 
 export function localHlsUrl(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">) {
   const key = `live_${safeKey(camera)}`;
-  // go2rtc v1.9: HLS endpoint via API REST (aceita src= como nome do stream)
   return `${GO2RTC_API}/api/stream.m3u8?src=${encodeURIComponent(key)}`;
 }
 
-export async function probeStreamReady(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">): Promise<boolean> {
-  const key = `live_${safeKey(camera)}`;
-  try {
-    // Verifica se o stream já tem producers ativos (câmera conectada)
-    const res = await fetch(`${GO2RTC_API}/api/streams`);
-    if (!res.ok) return false;
-    const data = await res.json() as Record<string, { producers?: { state?: string }[] }>;
-    const stream = data[key];
-    if (!stream) return false;
-    // "pronto" apenas quando há pelo menos um producer com state != "error"
-    const producers = stream.producers ?? [];
-    return producers.length > 0;
-  } catch {
-    return false;
-  }
+function dvripUrl(camera: DiscoveredCamera) {
+  const cred = config.get("cameraCredentials")[camera.ip] ?? { user: "admin", pass: "" };
+  const user = encodeURIComponent(cred.user || "admin");
+  const pass = encodeURIComponent(cred.pass || "");
+  // subtype=1 = substream H.264 (câmeras XM com main stream H.265 sempre têm isso)
+  // subtype=0 = main stream H.265 — evitado para não depender de FFmpeg
+  return `dvrip://${user}:${pass}@${camera.ip}:34567?channel=0&subtype=1`;
 }
 
-function dvripUrl(camera: DiscoveredCamera) {
-  const credentials = config.get("cameraCredentials")[camera.ip] ?? { user: "admin", pass: "" };
-  const user = encodeURIComponent(credentials.user || "admin");
-  const pass = encodeURIComponent(credentials.pass || "");
-  return `dvrip://${user}:${pass}@${camera.ip}:34567?channel=0&subtype=0`;
+function relayCameras() {
+  return (config.get("lastDiscoveredCameras") ?? []).filter(
+    (c) => !!(c.streamKey || c.serialNumber),
+  );
 }
 
 function createGo2rtcConfig(cameras: DiscoveredCamera[]) {
-  const streams: Record<string, string[]> = {};
-  const publish: Record<string, string[]> = {};
-  // preload: força go2rtc a conectar na câmera imediatamente (sem esperar consumer)
+  const streams: Record<string, string | string[]> = {};
   const preload: Record<string, string[]> = {};
-  const remoteRelayEnabled = config.get("remoteRelayEnabled");
 
-  for (const camera of cameras) {
-    const key = `live_${safeKey(camera)}`;
-    // Fluxo primário: DVRIP direto.
-    // Fallback ffmpeg: transcodifica H.265→H.264 quando câmera usa codec 82.
-    streams[key] = [
-      dvripUrl(camera),
-      `ffmpeg:${key}#video=h264#audio=aac`,
-    ];
-    // Preload garante que a câmera já está conectada quando o HLS.js pedir o M3U8
+  for (const cam of cameras) {
+    const key = `live_${safeKey(cam)}`;
+    // Só DVRIP substream — sem FFmpeg, sem transcodificação
+    streams[key] = dvripUrl(cam);
+    // preload: conecta imediatamente sem esperar primeiro consumer
     preload[key] = [];
-    if (remoteRelayEnabled && camera.publishUrl) {
-      publish[key] = [camera.publishUrl];
-    }
   }
 
   return {
     api: { listen: "127.0.0.1:1984", origin: "*" },
     rtsp: { listen: "127.0.0.1:8554" },
-    // HLS habilitado sem porta dedicada — servido via API REST (/api/stream.m3u8)
-    ffmpeg: { bin: ffmpegPath() },
     streams,
     preload,
-    ...(Object.keys(publish).length ? { publish } : {}),
   };
 }
 
-function hashConfig(value: unknown) {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+// ── go2rtc process ───────────────────────────────────────────────────────────
+
+function hashConfig(v: unknown) {
+  return createHash("sha256").update(JSON.stringify(v)).digest("hex");
 }
 
 function terminateRelay() {
@@ -181,48 +150,46 @@ async function launchRelay() {
 
   const executable = binaryPath();
   if (!fs.existsSync(executable)) {
-    appendLog("error", `go2rtc nao encontrado em ${executable}. Reinstale o gateway.`);
+    appendLog("error", `go2rtc não encontrado em ${executable}`);
     return;
   }
-  if (!fs.existsSync(ffmpegPath())) {
-    appendLog("warn", `FFmpeg nao encontrado em ${ffmpegPath()}; cameras H265 nao poderao ser transcodificadas.`);
-  } else {
-    appendLog("info", `FFmpeg: ${ffmpegPath()}`);
-  }
 
-  const go2rtcConfig = createGo2rtcConfig(cameras);
-  const nextFingerprint = hashConfig(go2rtcConfig);
-  if (relay && nextFingerprint === relayFingerprint) return;
+  const cfg = createGo2rtcConfig(cameras);
+  const fingerprint = hashConfig(cfg);
+  if (relay && fingerprint === relayFingerprint) return;
 
-  relayFingerprint = nextFingerprint;
+  relayFingerprint = fingerprint;
   terminateRelay();
-  await writeFile(localConfigPath(), JSON.stringify(go2rtcConfig, null, 2), "utf8");
+  await writeFile(localConfigPath(), JSON.stringify(cfg, null, 2), "utf8");
+  appendLog("info", `iniciando go2rtc para ${cameras.length} câmera(s) — substream H.264, sem FFmpeg`);
 
-  appendLog("info", `iniciando relay ao vivo para ${cameras.length} camera(s)`);
   const child = spawn(executable, ["-c", localConfigPath()], {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   relay = child;
-  child.stdout.on("data", (chunk) => {
+
+  child.stdout.on("data", (chunk: Buffer) => {
     for (const line of String(chunk).split("\n").map((l) => l.trim()).filter(Boolean)) {
       appendLog("info", `[go2rtc] ${line}`);
     }
   });
-  child.stderr.on("data", (chunk) => {
+  child.stderr.on("data", (chunk: Buffer) => {
     for (const line of String(chunk).split("\n").map((l) => l.trim()).filter(Boolean)) {
       appendLog("warn", `[go2rtc] ${line}`);
     }
   });
-  child.on("error", (error) => appendLog("error", `falha ao iniciar go2rtc: ${(error as Error).message}`));
-  child.on("close", (code) => {
+  child.on("error", (err: Error) => appendLog("error", `go2rtc falhou ao iniciar: ${err.message}`));
+  child.on("close", (code: number) => {
     relay = null;
     if (stopping) return;
-    appendLog("warn", `relay encerrado (codigo=${code}); reiniciando em ${RESTART_DELAY_MS / 1000}s`);
+    appendLog("warn", `go2rtc encerrou (código=${code}), reiniciando em ${RESTART_DELAY_MS / 1000}s`);
     if (restartTimer) clearTimeout(restartTimer);
     restartTimer = setTimeout(() => void launchRelay(), RESTART_DELAY_MS);
   });
 }
+
+// ── Heartbeat ────────────────────────────────────────────────────────────────
 
 async function sendHeartbeat() {
   try {
@@ -230,19 +197,32 @@ async function sendHeartbeat() {
       method: "POST",
       body: JSON.stringify({
         appVersion: app.getVersion(),
-        streamRelay: {
-          configuredCameras: relayCameras().length,
-          running: !!relay,
-        },
+        streamRelay: { configuredCameras: relayCameras().length, running: !!relay },
       }),
     });
-  } catch (error) {
-    console.warn("[heartbeat] falhou:", (error as Error).message);
+  } catch (err) {
+    appendLog("warn", `heartbeat falhou: ${(err as Error).message}`);
   }
 }
 
+// ── API pública ──────────────────────────────────────────────────────────────
+
 export function isRelayRunning() {
   return relay !== null;
+}
+
+export async function probeStreamReady(
+  camera: Pick<DiscoveredCamera, "serialNumber" | "streamKey">,
+): Promise<boolean> {
+  const key = `live_${safeKey(camera)}`;
+  try {
+    const res = await fetch(`${GO2RTC_API}/api/streams`);
+    if (!res.ok) return false;
+    const data = (await res.json()) as Record<string, { producers?: unknown[] }>;
+    return (data[key]?.producers?.length ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 export function runStreamRelay() {
