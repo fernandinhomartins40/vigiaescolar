@@ -146,10 +146,13 @@ function attachHls(video: HTMLVideoElement, url: string): Hls | null {
     const hls = new Hls({
       lowLatencyMode: true,
       backBufferLength: 10,
-      // Reduz retentativas iniciais para que erros de stream apareçam mais rápido
-      manifestLoadingMaxRetry: 3,
-      levelLoadingMaxRetry: 3,
-      fragLoadingMaxRetry: 3,
+      // go2rtc pode demorar alguns segundos para conectar na câmera DVRIP —
+      // retentativas generosas evitam o manifestParsingError prematuro
+      manifestLoadingMaxRetry: 10,
+      manifestLoadingRetryDelay: 2000,
+      manifestLoadingMaxRetryTimeout: 30000,
+      levelLoadingMaxRetry: 6,
+      fragLoadingMaxRetry: 6,
     });
     hls.loadSource(url);
     hls.attachMedia(video);
@@ -159,7 +162,7 @@ function attachHls(video: HTMLVideoElement, url: string): Hls | null {
     return hls;
   }
 
-  // Fallback nativo (Safari / Electron com suporte HLS built-in)
+  // Fallback nativo (Electron com suporte HLS built-in)
   video.src = url;
   video.play().catch(() => undefined);
   return null;
@@ -203,6 +206,9 @@ export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDT
   // Inicia/reinicia o stream de vídeo sempre que a URL da câmera muda
   useEffect(() => {
     const url = selectedCamera?.localLiveUrl ?? null;
+    const serial = selectedCamera?.serialNumber ?? null;
+    const streamKey = selectedCamera?.streamKey;
+
     if (url === currentUrlRef.current) return;
     currentUrlRef.current = url;
 
@@ -221,36 +227,65 @@ export function EdgeRecognition({ cameras, edge }: { cameras: DiscoveredCameraDT
     setStreamError(null);
     setRecognizing(false);
 
-    if (!url || !video) {
+    if (!url || !serial || !video) {
       setMessage(selectedCamera ? "Relay de vídeo aguardando... Aguarde o go2rtc iniciar." : "Aguardando câmera local.");
       return;
     }
 
-    setMessage("Conectando ao stream de vídeo...");
+    let cancelled = false;
 
-    const hls = attachHls(video, url);
-    hlsRef.current = hls;
+    async function startStream() {
+      if (!video) return;
 
-    if (hls) {
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) {
-          const msg = `Erro no stream: ${data.type} — ${data.details}`;
-          console.warn("[edge-video]", msg);
-          setStreamError(msg);
-          setMessage("Falha no stream. Verifique se a câmera está acessível na rede.");
+      // Aguarda o go2rtc registrar o stream antes de tentar HLS
+      // (evita manifestParsingError — go2rtc retorna JSON de erro enquanto conecta)
+      setMessage("Aguardando go2rtc conectar na câmera...");
+      const MAX_PROBE_ATTEMPTS = 15;
+      const PROBE_INTERVAL_MS = 2000;
+      for (let attempt = 0; attempt < MAX_PROBE_ATTEMPTS; attempt++) {
+        if (cancelled) return;
+        const { ready } = await window.gateway.probeStream(serial!, streamKey);
+        if (ready) break;
+        if (attempt === MAX_PROBE_ATTEMPTS - 1) {
+          setMessage("go2rtc não conseguiu conectar na câmera. Verifique IP e credenciais DVRIP.");
+          setStreamError("Câmera DVRIP não respondeu após 30s");
+          return;
         }
-      });
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        setStreamError(null);
-        setMessage("Vídeo ao vivo conectado.");
-      });
+        setMessage(`Aguardando câmera... (${attempt + 1}/${MAX_PROBE_ATTEMPTS})`);
+        await new Promise((r) => setTimeout(r, PROBE_INTERVAL_MS));
+      }
+
+      if (cancelled || !video) return;
+      setMessage("Conectando ao stream HLS...");
+
+      const hls = attachHls(video, url!);
+      hlsRef.current = hls;
+
+      if (hls) {
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (data.fatal) {
+            const msg = `${data.type} — ${data.details}`;
+            console.warn("[edge-video] erro HLS:", msg);
+            setStreamError(msg);
+            setMessage("Falha no stream HLS. Veja o painel de logs para detalhes.");
+          }
+        });
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (cancelled) return;
+          setStreamError(null);
+          setMessage("Vídeo ao vivo conectado.");
+        });
+      }
+
+      video.addEventListener("playing", () => {
+        if (cancelled) return;
+        setMessage(modelsReady ? "Vídeo ao vivo. Clique em Iniciar reconhecimento." : "Vídeo ao vivo. Carregando modelos...");
+      }, { once: true });
     }
 
-    video.addEventListener("playing", onPlaying, { once: true });
-    function onPlaying() {
-      setMessage(modelsReady ? "Vídeo ao vivo. Clique em Iniciar reconhecimento." : "Vídeo ao vivo. Carregando modelos...");
-    }
-  }, [selectedCamera?.localLiveUrl]);
+    void startStream();
+    return () => { cancelled = true; };
+  }, [selectedCamera?.localLiveUrl, selectedCamera?.serialNumber]);
 
   const stopRecognition = useCallback(() => {
     if (timerRef.current) window.clearInterval(timerRef.current);

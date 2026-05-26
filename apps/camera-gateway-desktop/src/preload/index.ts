@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { EdgeRecognitionEventDTO, EdgeSyncStateDTO, GatewayStatus, PairResponse } from "../shared/types";
+import type { EdgeRecognitionEventDTO, EdgeSyncStateDTO, GatewayStatus, LogEntry, PairResponse } from "../shared/types";
 
 contextBridge.exposeInMainWorld("gateway", {
   getStatus: (): Promise<GatewayStatus> => ipcRenderer.invoke("config:get"),
@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld("gateway", {
   submitEdgeRecognition: (payload: EdgeRecognitionEventDTO): Promise<{ ok: boolean; queued?: boolean }> =>
     ipcRenderer.invoke("edge:recognition", payload),
   checkForUpdates: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("updates:check"),
+  getLogs: (): Promise<LogEntry[]> => ipcRenderer.invoke("logs:get"),
+  probeStream: (serialNumber: string, streamKey?: string): Promise<{ ready: boolean }> =>
+    ipcRenderer.invoke("stream:probe", serialNumber, streamKey),
   onStatusChanged: (callback: () => void): (() => void) => {
     const listener = () => callback();
     ipcRenderer.on("status:changed", listener);
@@ -29,6 +32,8 @@ declare global {
       getEdge: () => Promise<{ state: EdgeSyncStateDTO; pendingEvents: number }>;
       submitEdgeRecognition: (payload: EdgeRecognitionEventDTO) => Promise<{ ok: boolean; queued?: boolean }>;
       checkForUpdates: () => Promise<{ ok: boolean }>;
+      getLogs: () => Promise<LogEntry[]>;
+      probeStream: (serialNumber: string, streamKey?: string) => Promise<{ ready: boolean }>;
       onStatusChanged: (callback: () => void) => () => void;
     };
   }

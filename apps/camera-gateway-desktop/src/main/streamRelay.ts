@@ -17,6 +17,7 @@ import { apiRequest } from "./pairing";
 
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const RESTART_DELAY_MS = 5_000;
+const GO2RTC_API = "http://127.0.0.1:1984";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 let relay: ReturnType<typeof spawn> | null = null;
@@ -24,6 +25,24 @@ let relayFingerprint = "";
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let restartTimer: NodeJS.Timeout | null = null;
 let stopping = false;
+
+type LogLevel = "info" | "warn" | "error";
+type LogEntry = { ts: number; level: LogLevel; msg: string };
+const logBuffer: LogEntry[] = [];
+const MAX_LOG = 400;
+
+export function appendLog(level: LogLevel, msg: string) {
+  const entry: LogEntry = { ts: Date.now(), level, msg };
+  logBuffer.push(entry);
+  if (logBuffer.length > MAX_LOG) logBuffer.shift();
+  if (level === "error") console.error(`[stream] ${msg}`);
+  else if (level === "warn") console.warn(`[stream] ${msg}`);
+  else console.log(`[stream] ${msg}`);
+}
+
+export function getLogs(): LogEntry[] {
+  return [...logBuffer];
+}
 
 function relayCameras() {
   return (config.get("lastDiscoveredCameras") ?? []).filter((camera) => !!(camera.streamKey || camera.serialNumber));
@@ -55,7 +74,20 @@ export function safeKey(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumb
 
 export function localHlsUrl(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">) {
   const key = `live_${safeKey(camera)}`;
-  return `http://127.0.0.1:1984/api/stream.m3u8?src=${encodeURIComponent(key)}`;
+  // go2rtc v1.9+: endpoint HLS correto é /stream.m3u8 (não /api/stream.m3u8)
+  return `${GO2RTC_API}/stream.m3u8?src=${encodeURIComponent(key)}`;
+}
+
+export async function probeStreamReady(camera: Pick<DiscoveredCamera, "streamKey" | "serialNumber">): Promise<boolean> {
+  const key = `live_${safeKey(camera)}`;
+  try {
+    const res = await fetch(`${GO2RTC_API}/api/streams`);
+    if (!res.ok) return false;
+    const data = await res.json() as Record<string, unknown>;
+    return key in data;
+  } catch {
+    return false;
+  }
 }
 
 function dvripUrl(camera: DiscoveredCamera) {
@@ -132,19 +164,27 @@ async function launchRelay() {
   terminateRelay();
   await writeFile(localConfigPath(), JSON.stringify(go2rtcConfig, null, 2), "utf8");
 
-  console.log(`[stream] iniciando relay ao vivo para ${cameras.length} camera(s)`);
+  appendLog("info", `iniciando relay ao vivo para ${cameras.length} camera(s)`);
   const child = spawn(executable, ["-c", localConfigPath()], {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   relay = child;
-  child.stdout.on("data", (chunk) => console.log(`[go2rtc] ${String(chunk).trim()}`));
-  child.stderr.on("data", (chunk) => console.warn(`[go2rtc] ${String(chunk).trim()}`));
-  child.on("error", (error) => console.error("[stream] falha ao iniciar go2rtc:", error));
+  child.stdout.on("data", (chunk) => {
+    for (const line of String(chunk).split("\n").map((l) => l.trim()).filter(Boolean)) {
+      appendLog("info", `[go2rtc] ${line}`);
+    }
+  });
+  child.stderr.on("data", (chunk) => {
+    for (const line of String(chunk).split("\n").map((l) => l.trim()).filter(Boolean)) {
+      appendLog("warn", `[go2rtc] ${line}`);
+    }
+  });
+  child.on("error", (error) => appendLog("error", `falha ao iniciar go2rtc: ${(error as Error).message}`));
   child.on("close", (code) => {
     relay = null;
     if (stopping) return;
-    console.warn(`[stream] relay encerrado (codigo=${code}); reiniciando.`);
+    appendLog("warn", `relay encerrado (codigo=${code}); reiniciando em ${RESTART_DELAY_MS / 1000}s`);
     if (restartTimer) clearTimeout(restartTimer);
     restartTimer = setTimeout(() => void launchRelay(), RESTART_DELAY_MS);
   });

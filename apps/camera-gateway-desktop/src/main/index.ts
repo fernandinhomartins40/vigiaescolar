@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { autoUpdater } from "electron-updater";
 import { config, saveConfig } from "./config";
 import { runDiscoveryLoop, stopDiscovery } from "./lanDiscovery";
-import { isRelayRunning, localHlsUrl, runStreamRelay, stopStreamRelay } from "./streamRelay";
+import { appendLog, getLogs, isRelayRunning, localHlsUrl, probeStreamReady, runStreamRelay, stopStreamRelay } from "./streamRelay";
 import { pairWithServer } from "./pairing";
 import {
   edgeSyncState,
@@ -251,6 +251,15 @@ ipcMain.handle("edge:recognition", async (_evt, payload) => {
 ipcMain.handle("updates:check", async () => {
   await checkForUpdates();
   return { ok: true };
+});
+
+ipcMain.handle("logs:get", () => getLogs());
+
+ipcMain.handle("stream:probe", async (_evt, serialNumber: string, streamKey?: string) => {
+  const camera = { serialNumber, streamKey };
+  const ready = await probeStreamReady(camera);
+  appendLog("info", `probe stream ${serialNumber}: ${ready ? "pronto" : "aguardando"}`);
+  return { ready };
 });
 
 // ─── Auto-launch + atualização ──────────────────────────────────────────────

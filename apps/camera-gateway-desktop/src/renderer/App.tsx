@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import type { GatewayStatus } from "../shared/types";
 import { EdgeRecognition } from "./EdgeRecognition";
+import { LogPanel } from "./LogPanel";
 
 export function App() {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
@@ -106,6 +107,7 @@ export function App() {
               disabled={pairing}
             />
             <button
+              type="button"
               className="btn-primary"
               onClick={handlePair}
               disabled={pairing || code.length !== 6}
@@ -140,19 +142,19 @@ export function App() {
               <span className="status-badge online">conectado</span>
             </h2>
             <p>O gateway varre a rede local a cada 5 minutos. O vídeo e o reconhecimento rodam neste PC; a VPS recebe apenas eventos.</p>
-            <div className="row" style={{ marginBottom: 16 }}>
-              <button className="btn-secondary" onClick={handleDiscover}>
+            <div className="row cam-actions">
+              <button type="button" className="btn-secondary" onClick={handleDiscover}>
                 Procurar agora
               </button>
-              <button className="btn-secondary" onClick={handleEdgeSync}>
+              <button type="button" className="btn-secondary" onClick={handleEdgeSync}>
                 Sincronizar faces
               </button>
-              <button className="btn-danger" onClick={handleUnpair}>
+              <button type="button" className="btn-danger" onClick={handleUnpair}>
                 Desparear
               </button>
             </div>
             {status.lastDiscoveredCameras.length === 0 ? (
-              <p style={{ color: "var(--muted)" }}>
+              <p className="muted-hint">
                 Nenhuma câmera encontrada ainda. Confirme que:
                 <br /> 1. As câmeras estão ligadas e conectadas no mesmo Wi-Fi
                 <br /> 2. O roteador permite descoberta entre dispositivos (sem "isolamento de clientes")
@@ -188,6 +190,7 @@ export function App() {
           </p>
         </div>
         <button
+          type="button"
           className="btn-secondary"
           onClick={handleCheckUpdates}
           disabled={status.update.state === "checking"}
@@ -195,6 +198,8 @@ export function App() {
           {status.update.state === "checking" ? "Verificando..." : "Verificar atualização"}
         </button>
       </div>
+
+      <LogPanel />
     </div>
   );
 }

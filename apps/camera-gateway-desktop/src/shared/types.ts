@@ -102,3 +102,9 @@ export type GatewayStatus = {
 export type PairResponse =
   | { ok: true; gatewayId: string; gatewayName: string; schoolName?: string }
   | { ok: false; error: string };
+
+export type LogEntry = {
+  ts: number;
+  level: "info" | "warn" | "error";
+  msg: string;
+};
