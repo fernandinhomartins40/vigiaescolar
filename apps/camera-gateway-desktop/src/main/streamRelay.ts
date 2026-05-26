@@ -60,8 +60,8 @@ function ffmpegPath() {
   if (app.isPackaged) {
     return join(process.resourcesPath, "tools", "ffmpeg.exe");
   }
-
-  return join(__dirname, "..", "..", "..", "..", "node_modules", "@ffmpeg-installer", "win32-x64", "ffmpeg.exe");
+  // Em dev, usa o ffmpeg oficial baixado pelo script download-ffmpeg.mjs
+  return join(__dirname, "..", "..", "vendor", "ffmpeg", "ffmpeg.exe");
 }
 
 function localConfigPath() {
@@ -105,26 +105,26 @@ function createGo2rtcConfig(cameras: DiscoveredCamera[]) {
 
   for (const camera of cameras) {
     const key = `live_${safeKey(camera)}`;
-    // RTMPS aceita H264. Se a câmera já fornecer H264, usa o fluxo original;
-    // para câmeras H265, go2rtc ativa o fallback FFmpeg somente sob demanda.
+    // Fluxo primário: DVRIP direto.
+    // Fallback ffmpeg: transcodifica para H.264 se câmera usar H.265 (codec 82).
+    // HLS só suporta H.264/H.265 com fMP4; usamos H.264 para máxima compatibilidade.
     streams[key] = [
       dvripUrl(camera),
-      `ffmpeg:${key}#video=h264`,
+      `ffmpeg:${key}#video=h264#audio=aac`,
     ];
     if (remoteRelayEnabled && camera.publishUrl) {
       publish[key] = [camera.publishUrl];
     }
-    preload[key] = "video=h264";
   }
 
   return {
     api: { listen: "127.0.0.1:1984", origin: "*" },
     rtsp: { listen: "127.0.0.1:8554" },
     webrtc: { listen: "" },
+    hls: { listen: "" },
     ffmpeg: { bin: ffmpegPath() },
     streams,
     ...(Object.keys(publish).length ? { publish } : {}),
-    preload,
   };
 }
 

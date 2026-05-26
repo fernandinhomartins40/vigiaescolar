@@ -9,7 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "installer": "node scripts/download-go2rtc.mjs && electron-vite build && electron-builder --win nsis --x64 && node scripts/create-download-alias.mjs",
+    "installer": "node scripts/download-go2rtc.mjs && node scripts/download-ffmpeg.mjs && electron-vite build && electron-builder --win nsis --x64 && node scripts/create-download-alias.mjs",
     "package": "npm run installer",
     "package:msi": "npm run installer",
     "type-check": "tsc --noEmit"
